@@ -65,9 +65,9 @@ def build_stats_headers(settings, user_agent='OpenLP-SongStats/1.2'):
         'Content-Type': 'application/json',
         'User-Agent': user_agent,
     }
-    token = settings.value('songstats/api token')
-    if token and str(token).strip():
-        headers['Authorization'] = 'Bearer {0}'.format(str(token).strip())
+    token = read_api_token(settings)
+    if token:
+        headers['Authorization'] = 'Bearer {0}'.format(token)
     return headers
 
 
@@ -239,6 +239,14 @@ def get_web_base(settings):
     if api_base.endswith('/api'):
         return api_base[:-4]
     return api_base
+
+
+def resolve_openlp_catalog_url(settings):
+    """Authenticated GET /songs/all-openlp (mapping index for push PATCH)."""
+    api_base = get_api_base(settings)
+    if not api_base:
+        return ''
+    return urljoin(api_base + '/', 'songs/all-openlp')
 
 
 def resolve_version_url(settings):

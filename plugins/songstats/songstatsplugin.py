@@ -493,6 +493,8 @@ class SongStatsPlugin(Plugin):
         self._enqueue_or_push_song(song_id)
 
     def _push_song_to_server(self, song_id, songs_api_base):
+        from openlp.plugins.songs.lib.db import Song
+
         from contrib.plugins.songstats.lib.songsync import build_push_operation_for_song
         from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
 
@@ -500,6 +502,12 @@ class SongStatsPlugin(Plugin):
         if not manager:
             return
         try:
+            song = manager.get_object(Song, song_id)
+            from contrib.plugins.songstats.lib.songsync import ensure_remote_index_for_song
+
+            self._remote_index = ensure_remote_index_for_song(
+                self.settings, self._remote_index, song
+            )
             operation = build_push_operation_for_song(
                 manager, self.settings, songs_api_base, song_id, self._remote_index
             )
@@ -522,7 +530,11 @@ class SongStatsPlugin(Plugin):
         self._push_in_progress = False
         manager = get_songs_manager()
         if manager and post_results:
-            apply_push_response_ids(manager, post_results)
+            self._suppress_song_push = True
+            try:
+                apply_push_response_ids(manager, post_results)
+            finally:
+                self._suppress_song_push = False
         summary_lower = (summary or '').lower()
         if 'updated=0' in summary_lower and 'created=0' in summary_lower and 'errors=' in summary_lower:
             err_part = summary.split('errors=', 1)[-1].split(',')[0].strip()
@@ -1174,7 +1186,7 @@ class SongStatsPlugin(Plugin):
                 1,
                 translate('SongStatsPlugin', 'Pobieranie indeksu katalogu serwera…'),
             )
-            stamped = stamp_remote_ids_after_sqlite_bootstrap(
+            stamped, link_index = stamp_remote_ids_after_sqlite_bootstrap(
                 manager,
                 self.settings,
                 on_progress=lambda current, total: on_post_import_progress(
@@ -1186,6 +1198,8 @@ class SongStatsPlugin(Plugin):
                     ).format(current=current, total=total),
                 ),
             )
+            if link_index:
+                self._remote_index.update(link_index)
         except Exception:
             log.exception('Remote id stamping after SQLite import failed')
         self._last_import_summary = (

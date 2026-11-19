@@ -71,11 +71,6 @@ def push_summary_had_upload(summary):
         key, _, value = chunk.partition('=')
         parts[key.strip()] = value.strip()
     try:
-        if int(parts.get('errors', '0') or '0') > 0:
-            return False
-    except ValueError:
-        pass
-    try:
         if int(parts.get('created', '0') or '0') > 0:
             return True
         if int(parts.get('updated', '0') or '0') > 0:
@@ -307,12 +302,23 @@ class MasterApiPushWorker(ThreadWorker):
                         )
                         continue
 
+                    log.info(
+                        'KWCH: push %s %s -> HTTP %s (local openlp id=%s)',
+                        method,
+                        op['url'],
+                        response.status_code,
+                        op.get('local_id'),
+                    )
+
                     if method == 'POST':
                         created += 1
                         try:
                             body = response.json()
-                            remote_id = body.get('id')
+                            remote_id = body.get('id') or body.get('_id')
+                            if isinstance(remote_id, dict) and remote_id.get('$oid'):
+                                remote_id = remote_id['$oid']
                             if remote_id:
+                                remote_id = str(remote_id)
                                 post_results.append({
                                     'method': 'POST',
                                     'local_id': op['local_id'],
