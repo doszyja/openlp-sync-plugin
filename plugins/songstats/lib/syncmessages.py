@@ -1,6 +1,39 @@
 # -*- coding: utf-8 -*-
 """User-facing sync error messages (Polish-first via translate source strings)."""
+from PyQt5 import QtWidgets
+
 from openlp.core.common.i18n import translate
+
+
+def prompt_catalog_update_available(parent, remote_version, local_version_label):
+    """
+    Inform user that the server catalog is newer. Returns True if they chose Synchronizuj.
+    """
+    box = QtWidgets.QMessageBox(parent)
+    box.setIcon(QtWidgets.QMessageBox.Information)
+    box.setWindowTitle(translate('SongStatsPlugin', 'Dostępna aktualizacja katalogu'))
+    box.setText(
+        translate(
+            'SongStatsPlugin',
+            'Serwer ma wersję {remote}. Lokalnie: {local}.',
+        ).format(remote=remote_version, local=local_version_label)
+    )
+    box.setInformativeText(
+        translate(
+            'SongStatsPlugin',
+            'Pobierz zmiany z serwera KWCH, aby wyrównać katalog pieśni.',
+        )
+    )
+    sync_btn = box.addButton(
+        translate('SongStatsPlugin', 'Synchronizuj'),
+        QtWidgets.QMessageBox.ActionRole,
+    )
+    box.addButton(
+        translate('SongStatsPlugin', 'Później'),
+        QtWidgets.QMessageBox.RejectRole,
+    )
+    box.exec_()
+    return box.clickedButton() is sync_btn
 
 
 def explain_sync_error(raw_detail):

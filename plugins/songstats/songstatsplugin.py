@@ -58,7 +58,10 @@ from contrib.plugins.songstats.lib.catalogstate import (
     remove_drift_songs_pushed,
 )
 from contrib.plugins.songstats.lib.pluginutil import get_remote_id, get_songs_manager
-from contrib.plugins.songstats.lib.syncmessages import explain_sync_error
+from contrib.plugins.songstats.lib.syncmessages import (
+    explain_sync_error,
+    prompt_catalog_update_available,
+)
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +102,8 @@ class SongStatsPlugin(Plugin):
         self._prefetched_catalog_items = None
         self._songs_api_base = ''
         self._presentation_event_ids = set()
+        self._version_check_context = None
+        self._startup_sync_done = False
         # State module id must match Registry key from class name: SongStatsPlugin → song_stats_plugin
         self._state_name = 'song_stats'
         State().add_service(self._state_name, self.weight, is_plugin=True, requires='songs')
@@ -127,6 +132,7 @@ class SongStatsPlugin(Plugin):
             self._prune_stale_version_settings()
             if self.settings.value('songstats/push on edit') is None:
                 self.settings.setValue('songstats/push on edit', True)
+            QtCore.QTimer.singleShot(1500, self._run_startup_catalog_sync)
 
     def check_pre_conditions(self):
         return Registry().get('songs_manager') is not None
@@ -389,6 +395,39 @@ class SongStatsPlugin(Plugin):
             self.sync_header_widget.set_status_text(
                 translate('SongStatsPlugin', 'Anulowanie po bieżącym kroku…')
             )
+
+    @staticmethod
+    def _sync_on_startup_enabled(settings):
+        value = settings.value('songstats/sync on startup')
+        if value is None:
+            return True
+        if value is False or value == 0:
+            return False
+        if isinstance(value, str) and value.strip().lower() in ('false', '0', 'no', 'off'):
+            return False
+        return True
+
+    def _run_startup_catalog_sync(self):
+        """After main window is up: check server catalog version and pull if needed."""
+        if not self.is_active() or self._startup_sync_done:
+            return
+        if not self._sync_on_startup_enabled(self.settings):
+            return
+        if self._sync_in_progress or self._version_check_in_progress:
+            QtCore.QTimer.singleShot(2000, self._run_startup_catalog_sync)
+            return
+        if not Registry().get('main_window'):
+            QtCore.QTimer.singleShot(500, self._run_startup_catalog_sync)
+            return
+        if is_local_catalog_drifted(self.settings):
+            if not self._ask_drift_resolution_if_needed():
+                return
+            if self._sync_in_progress or self._bulk_push_in_progress:
+                return
+        self._startup_sync_done = True
+        log.info('KWCH: automatyczna synchronizacja przy starcie OpenLP')
+        self._version_check_context = 'startup'
+        self._run_catalog_version_check()
 
     @staticmethod
     def _push_on_edit_enabled(settings):
@@ -995,6 +1034,7 @@ class SongStatsPlugin(Plugin):
         if is_local_catalog_drifted(self.settings):
             if not self._ask_drift_resolution_if_needed():
                 return
+        self._version_check_context = 'manual'
         self._run_catalog_version_check()
 
     def _on_version_check_succeeded(self, version):
@@ -1004,21 +1044,23 @@ class SongStatsPlugin(Plugin):
         if version is not None:
             self.settings.setValue('songstats/master db version', str(version))
         self._refresh_sync_header_display()
+        context = self._version_check_context
+        self._version_check_context = None
+        local_label = self.settings.value('songstats/local db version') or translate(
+            'SongStatsPlugin', 'brak'
+        )
         if self._catalog_update_available():
-            self.main_window.information_message(
-                translate('SongStatsPlugin', 'Dostępna aktualizacja katalogu'),
-                translate(
-                    'SongStatsPlugin',
-                    'Serwer ma wersję {remote}. Lokalnie: {local}.\n\n'
-                    'Użyj przycisku Synchronizuj, aby pobrać zmiany.',
-                ).format(
-                    remote=version,
-                    local=self.settings.value('songstats/local db version') or translate(
-                        'SongStatsPlugin', 'brak'
-                    ),
-                ),
-            )
-        else:
+            if context == 'startup':
+                log.info(
+                    'KWCH: startup — wykryto nowszą wersję katalogu (%s), pobieram',
+                    version,
+                )
+                self._start_catalog_pull(discard_local=False)
+                return
+            parent = self._main_window_for_dialog()
+            if parent and prompt_catalog_update_available(parent, version, local_label):
+                self._start_catalog_pull(discard_local=False)
+        elif context != 'startup':
             self.main_window.information_message(
                 translate('SongStatsPlugin', 'Katalog aktualny'),
                 translate(

@@ -34,6 +34,7 @@ def register_songstats_settings_defaults():
         'songstats/web base url': '',
         'songstats/use production default': True,
         'songstats/push on edit': True,
+        'songstats/sync on startup': True,
         'songstats/sync bidirectional': False,
         'songstats/sync pull mode': SYNC_PULL_JSON,
         'songstats/sync pull url': '',
