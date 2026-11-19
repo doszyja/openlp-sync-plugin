@@ -1,0 +1,9 @@
+{
+  "id": "songstats",
+  "name": "KWCH Swietochlowice plugin",
+  "version": "1.2.0",
+  "openlp_min": "4.0",
+  "module": "contrib.plugins.songstats.songstatsplugin",
+  "plugin_class": "SongStatsPlugin",
+  "description": "Live presentation stats, Discord login, and catalog sync with KWCH piesni API."
+}

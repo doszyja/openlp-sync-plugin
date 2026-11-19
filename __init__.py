@@ -1,0 +1,1 @@
+# Community extensions for OpenLP (installed under DataDir/contrib).

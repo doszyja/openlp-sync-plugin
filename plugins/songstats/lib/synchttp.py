@@ -1,0 +1,265 @@
+# -*- coding: utf-8 -*-
+"""
+HTTP workers for song catalog sync (network only — DB work runs on the main Qt thread).
+"""
+import logging
+import tempfile
+from pathlib import Path
+
+import requests
+from PyQt5 import QtCore
+
+from openlp.core.common.httputils import get_proxy_settings
+from openlp.core.common.registry import Registry
+from openlp.core.threading import ThreadWorker
+
+from contrib.plugins.songstats.lib.apiutil import (
+    build_auth_headers,
+    get_connect_timeout,
+    get_request_timeouts,
+    get_timeout,
+    resolve_version_url,
+)
+
+log = logging.getLogger(__name__)
+
+
+def parse_songs_response(response):
+    """
+    Returns (songs, version, deleted_song_ids, incremental_full_fallback).
+    """
+    data = response.json()
+    deleted_ids = []
+    incremental_full = False
+    if isinstance(data, list):
+        return data, None, deleted_ids, incremental_full
+    if isinstance(data, dict):
+        version = data.get('version')
+        if data.get('deletedSongIds'):
+            deleted_ids = list(data.get('deletedSongIds') or [])
+        incremental_full = bool(data.get('full'))
+        if 'songs' in data and isinstance(data['songs'], list):
+            return data['songs'], version, deleted_ids, incremental_full
+        if 'data' in data and isinstance(data['data'], list):
+            return data['data'], version, deleted_ids, incremental_full
+    raise ValueError(
+        'Unexpected sync response (expected {"songs": [...]} from GET /songs/all-openlp or a JSON array)'
+    )
+
+
+class SongVersionWorker(ThreadWorker):
+    """GET /songs/version — current master song database revision."""
+
+    version_succeeded = QtCore.pyqtSignal(object)
+    version_failed = QtCore.pyqtSignal(str)
+
+    def start(self):
+        settings = Registry().get('settings')
+        url = resolve_version_url(settings)
+        if not url:
+            self.version_failed.emit('API base URL is not configured')
+            self.quit.emit()
+            return
+        try:
+            response = requests.get(
+                url,
+                headers=build_auth_headers(settings),
+                proxies=get_proxy_settings(),
+                timeout=get_request_timeouts(settings),
+            )
+            if response.status_code >= 400:
+                self.version_failed.emit(
+                    'Version check HTTP {code}'.format(code=response.status_code)
+                )
+                return
+            data = response.json()
+            version = data.get('version') if isinstance(data, dict) else data
+            if version is None:
+                self.version_failed.emit('No version field in response')
+                return
+            self.version_succeeded.emit(version)
+        except Exception as error:
+            log.exception('Song version check failed')
+            self.version_failed.emit(str(error))
+        finally:
+            self.quit.emit()
+
+
+class SongSyncPullWorker(ThreadWorker):
+    pull_succeeded = QtCore.pyqtSignal(list, object, list, bool)
+    pull_failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, pull_url):
+        super().__init__()
+        self._pull_url = pull_url
+
+    def start(self):
+        settings = Registry().get('settings')
+        try:
+            response = requests.get(
+                self._pull_url,
+                headers=build_auth_headers(settings),
+                proxies=get_proxy_settings(),
+                timeout=get_request_timeouts(settings),
+            )
+            if response.status_code >= 400:
+                if response.status_code in (401, 403):
+                    self.pull_failed.emit(
+                        'Pull rejected ({code}): zaloguj ponownie kontem KWCH (menu Konto w OpenLP).'
+                        .format(code=response.status_code)
+                    )
+                else:
+                    self.pull_failed.emit(
+                        'Pull failed with HTTP {code}: {body}'.format(
+                            code=response.status_code,
+                            body=response.text[:300],
+                        )
+                    )
+                return
+            songs, version, deleted_ids, incremental_full = parse_songs_response(response)
+            self.pull_succeeded.emit(songs, version, deleted_ids, incremental_full)
+        except requests.exceptions.Timeout as error:
+            self.pull_failed.emit('Connection timed out: {0}'.format(error))
+        except requests.exceptions.ConnectionError as error:
+            self.pull_failed.emit('Connection failed: {0}'.format(error))
+        except requests.exceptions.RequestException as error:
+            log.exception('Song sync pull failed')
+            self.pull_failed.emit(str(error))
+        except Exception as error:
+            log.exception('Song sync pull failed')
+            self.pull_failed.emit(str(error))
+        finally:
+            self.quit.emit()
+
+
+class SongSyncSqlitePullWorker(ThreadWorker):
+    """Download GET /songs/export/sqlite to a temporary file."""
+    pull_succeeded = QtCore.pyqtSignal(object)
+    pull_failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, pull_url):
+        super().__init__()
+        self._pull_url = pull_url
+
+    def start(self):
+        settings = Registry().get('settings')
+        headers = build_auth_headers(settings, accept='application/x-sqlite3')
+        headers.pop('Content-Type', None)
+        try:
+            response = requests.get(
+                self._pull_url,
+                headers=headers,
+                proxies=get_proxy_settings(),
+                timeout=(get_connect_timeout(), max(get_timeout(settings), 120.0)),
+                stream=True,
+            )
+            if response.status_code >= 400:
+                self.pull_failed.emit(
+                    'SQLite pull failed with HTTP {code}'.format(code=response.status_code)
+                )
+                return
+            temp_dir = Path(tempfile.gettempdir()) / 'openlp'
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            dest = temp_dir / 'songstats-master-export.sqlite'
+            with dest.open('wb') as handle:
+                for chunk in response.iter_content(chunk_size=65536):
+                    if chunk:
+                        handle.write(chunk)
+            self.pull_succeeded.emit(dest)
+        except Exception as error:
+            log.exception('SQLite export download failed')
+            self.pull_failed.emit(str(error))
+        finally:
+            self.quit.emit()
+
+
+class MasterApiPushWorker(ThreadWorker):
+    push_succeeded = QtCore.pyqtSignal(object, str)
+    push_failed = QtCore.pyqtSignal(str)
+    push_progress = QtCore.pyqtSignal(int, int)
+
+    def __init__(self, operations):
+        super().__init__()
+        self._operations = operations
+
+    def start(self):
+        settings = Registry().get('settings')
+        headers = build_auth_headers(settings)
+        created = updated = errors = skipped = 0
+        post_results = []
+
+        if not self.settings_has_token(settings):
+            self.push_failed.emit(
+                'Push requires API token (log in via KWCH web). Upload skipped (no API token).'
+            )
+            self.quit.emit()
+            return
+
+        total = len(self._operations)
+        try:
+            for position, op in enumerate(self._operations, start=1):
+                self.push_progress.emit(position, total)
+                method = op['method']
+                try:
+                    if method == 'PATCH':
+                        response = requests.patch(
+                            op['url'],
+                            json=op['body'],
+                            headers=headers,
+                            proxies=get_proxy_settings(),
+                            timeout=get_request_timeouts(settings),
+                        )
+                    elif method == 'POST':
+                        response = requests.post(
+                            op['url'],
+                            json=op['body'],
+                            headers=headers,
+                            proxies=get_proxy_settings(),
+                            timeout=get_request_timeouts(settings),
+                        )
+                    else:
+                        skipped += 1
+                        continue
+
+                    if response.status_code == 401:
+                        self.push_failed.emit(
+                            'Push rejected (401): zaloguj ponownie (KWCH Swietochlowice plugin → Połącz z kontem).'
+                        )
+                        return
+                    if response.status_code >= 400:
+                        errors += 1
+                        log.warning('Push %s %s -> %s', method, op['url'], response.status_code)
+                        continue
+
+                    if method == 'POST':
+                        created += 1
+                        try:
+                            body = response.json()
+                            remote_id = body.get('id')
+                            if remote_id:
+                                post_results.append({
+                                    'method': 'POST',
+                                    'local_id': op['local_id'],
+                                    'remote_id': remote_id,
+                                })
+                        except ValueError:
+                            pass
+                    else:
+                        updated += 1
+                except OSError:
+                    errors += 1
+                    log.exception('Push request failed for %s', op['url'])
+
+            summary = 'created={c}, updated={u}, errors={e}, skipped={s}'.format(
+                c=created, u=updated, e=errors, s=skipped
+            )
+            self.push_succeeded.emit(post_results, summary)
+        except Exception as error:
+            log.exception('Master API push failed')
+            self.push_failed.emit(str(error))
+        finally:
+            self.quit.emit()
+
+    @staticmethod
+    def settings_has_token(settings):
+        return bool((settings.value('songstats/api token') or '').strip())
