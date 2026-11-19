@@ -1,30 +1,60 @@
-﻿# Download latest contrib plugin tree from GitHub and install into OpenLP DataDir.
-# Usage (one-liner in README):
-#   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1 | iex"
+﻿# Download latest plugin tree from GitHub and install into OpenLP DataDir.
+param(
+    [string]$Repo = 'doszyja/openlp-sync-plugin',
+    [string]$Branch = 'main'
+)
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'doszyja/openlp-sync-plugin'
-$Branch = 'main'
-$ZipUrl = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
-$Temp = Join-Path $env:TEMP "openlp-sync-plugin-$Branch"
-$ZipPath = Join-Path $env:TEMP "openlp-sync-plugin.zip"
-$Extracted = Join-Path $env:TEMP "$($Repo.Split('/')[1])-$Branch"
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+} catch {
+    # Windows PowerShell 5.1
+}
 
-foreach ($path in @($Temp, $Extracted)) {
+$RepoName = ($Repo -split '/', 2)[-1]
+if (-not $RepoName) {
+    Write-Error 'Invalid Repo id (expected owner/name).'
+}
+
+$ZipUrl = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
+$ZipPath = Join-Path $env:TEMP "openlp-sync-plugin-$Branch.zip"
+$Extracted = Join-Path $env:TEMP "$RepoName-$Branch"
+
+foreach ($path in @($Extracted, $ZipPath)) {
     if (Test-Path $path) {
-        Remove-Item -Path $path -Recurse -Force
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 Write-Host "Pobieranie $Repo ($Branch)..."
-Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
-Expand-Archive -Path $ZipPath -DestinationPath $env:TEMP -Force
-Remove-Item $ZipPath -Force
-
-if (-not (Test-Path (Join-Path $Extracted 'install.ps1'))) {
-    Write-Error "Brak install.ps1 w archiwum. Sprawdź gałąź $Branch w $Repo."
+try {
+    Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath -UseBasicParsing
+} catch {
+    Write-Error "Nie mozna pobrac archiwum ($ZipUrl). Czy repo jest publiczne i gałąź $Branch istnieje?"
 }
 
-Copy-Item -Path $Extracted -Destination $Temp -Recurse -Force
-& powershell -ExecutionPolicy Bypass -File (Join-Path $Temp 'install.ps1')
+if (-not (Test-Path $ZipPath) -or (Get-Item $ZipPath).Length -lt 100) {
+    Write-Error 'Pusty lub uszkodzony plik ZIP — sprawdz URL repozytorium.'
+}
+
+Expand-Archive -LiteralPath $ZipPath -DestinationPath $env:TEMP -Force
+Remove-Item -LiteralPath $ZipPath -Force
+
+$installScript = Join-Path $Extracted 'install.ps1'
+$pluginFile = Join-Path $Extracted 'plugins\songstats\songstatsplugin.py'
+
+if (-not (Test-Path -LiteralPath $installScript)) {
+    Write-Error "Brak install.ps1 w ($Extracted). Sprawdz gałąź $Branch lub strukture repo."
+}
+if (-not (Test-Path -LiteralPath $pluginFile)) {
+    Write-Error "Brak plugins\songstats w archiwum — to nie jest pelne repo contrib."
+}
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installScript
+
+if (-not (Test-Path (Join-Path $env:APPDATA 'openlp\data\contrib\plugins\songstats\songstatsplugin.py'))) {
+    Write-Error 'Instalacja nie skopiowala wtyczki — uruchom OpenLP raz i sprobuj ponownie.'
+}
+
+Write-Host 'Gotowe.'

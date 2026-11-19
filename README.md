@@ -4,17 +4,27 @@ Wtyczka community łączy [OpenLP](https://openlp.org/) 4+ z katalogiem pieśni 
 
 Kod i aktualizacje: **[github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin)**
 
-## Instalacja (Windows, jedna komenda)
+## Instalacja (Windows)
 
-W **PowerShell** (wystarczy raz; wymaga internetu):
+W **PowerShell** wklej **cały blok** (wymaga internetu; działa w oknie PS — nie owijaj w drugie `powershell -Command`):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1 | iex"
+$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'
+Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
 ```
 
-Skrypt pobierze najnowsze pliki z GitHub i skopiuje wtyczkę do folderu danych OpenLP.
+Z katalogu sklonowanego repo:
 
-Potem **uruchom ponownie OpenLP** → **Ustawienia → Zarządzaj wtyczkami** → włącz **KWCH Swietochlowice plugin**.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1
+```
+
+(Opcjonalnie tylko lokalne pliki: `.\install.ps1`.)
+
+Nie używaj `irm … | iex` — BOM z GitHub psuje pierwszą linię skryptu.
+
+Potem **zrestartuj OpenLP** → **Ustawienia → Zarządzaj wtyczkami** → włącz **KWCH Swietochlowice plugin**.
 
 ## Po instalacji
 
@@ -23,4 +33,4 @@ Potem **uruchom ponownie OpenLP** → **Ustawienia → Zarządzaj wtyczkami** �
 
 ---
 
-Dokumentacja techniczna, API, rozwój: [CONTEXT.md](CONTEXT.md)
+Dokumentacja techniczna: [CONTEXT.md](CONTEXT.md)

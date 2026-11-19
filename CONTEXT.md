@@ -42,7 +42,7 @@ Mechanizm: `sys.path` wstawia `DataDir`, potem `extension_loader(..., community=
 
 | Sposób | Plik / akcja |
 |--------|----------------|
-| Windows (użytkownik) | README → `irm …/install-from-github.ps1 \| iex` |
+| Windows (użytkownik) | README → `iwr …/install-from-github.ps1 -OutFile` + `& $f` (nie `irm \| iex` — BOM) |
 | Windows (clone repo) | `install.ps1` → `%APPDATA%\openlp\data\contrib\` |
 | Linux/macOS | `install.sh`, opcjonalnie `OPENLP_DATA` |
 | ZIP release | `package.ps1` → `dist/*-import.zip`, `*-contrib.zip` |
