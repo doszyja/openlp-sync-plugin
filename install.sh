@@ -14,5 +14,5 @@ mkdir -p "$TARGET_CONTRIB"
 cp -a "$SCRIPT_DIR/__init__.py" "$TARGET_CONTRIB/"
 cp -a "$SCRIPT_DIR/plugins" "$TARGET_CONTRIB/"
 
-echo "Zainstalowano wtyczkę KWCH (katalog: $TARGET_CONTRIB/plugins/songstats)"
-echo "Zrestartuj OpenLP → Ustawienia → Zarządzaj wtyczkami → włącz „KWCH Swietochlowice plugin”."
+echo "Installed Song Stats plugin under: $TARGET_CONTRIB/plugins/songstats"
+echo "Restart OpenLP, enable 'Song Stats' in Plugin Manager, then configure Settings."

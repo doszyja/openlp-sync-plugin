@@ -1,21 +1,31 @@
-# OpenLP — KWCH Song Stats
+# OpenLP — wtyczka KWCH Świętochłowice
 
-Synchronizacja pieśni i statystyki live z [KWCH Świętochłowice](https://piesni.swietochlowicekwch.pl). OpenLP 4+, Windows.
+Synchronizacja pieśni i statystyki live z [katalogiem KWCH](https://piesni.swietochlowicekwch.pl). Wymaga OpenLP 4+.
 
-**PowerShell**
+Repozytorium: [github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin)
+
+## Instalacja (Windows)
+
+**PowerShell** — wklej cały blok:
 
 ```powershell
-$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'; Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; Invoke-WebRequest -UseBasicParsing -Headers @{ 'Cache-Control' = 'no-cache' } -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
+$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'
+Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
 ```
 
-**Wiersz polecenia (cmd)** — `curl` jest w Windows 10+; uruchamia ten sam skrypt przez `powershell.exe`:
+Z klonu repozytorium: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1`
 
-```bat
-del /f /q "%TEMP%\kwch-openlp-install.ps1" 2>nul & curl -fsSL -H "Cache-Control: no-cache" -o "%TEMP%\kwch-openlp-install.ps1" "https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1" & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\kwch-openlp-install.ps1"
+### OpenLP portable
+
+Portable trzyma dane w folderze `Data` obok programu (nie w `%APPDATA%`). Uruchom portable raz, potem doinstaluj wtyczkę:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f -DataPath 'D:\sciezka\do\OpenLPPortable\Data'
 ```
 
-Z klonu: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1`
+(albo `.\install.ps1 -DataPath '…'` z katalogu repozytorium)
 
-Po instalacji: zrestartuj OpenLP → **Zarządzaj wtyczkami** → **KWCH Swietochlowice plugin**. Nie używaj `irm | iex` (BOM).
+Po instalacji: zrestartuj OpenLP → **Zarządzaj wtyczkami** → włącz **KWCH Swietochlowice plugin**.
 
-[github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin) · [CONTEXT.md](CONTEXT.md)
+Dokumentacja techniczna: [CONTEXT.md](CONTEXT.md)

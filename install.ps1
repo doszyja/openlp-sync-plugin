@@ -1,32 +1,38 @@
-﻿# Install Song Stats community plugin into the OpenLP data directory (Windows).
-# Usage: powershell -ExecutionPolicy Bypass -File install.ps1
+# Install Song Stats community plugin into the OpenLP data directory (Windows).
+# Usage: powershell -ExecutionPolicy Bypass -File install.ps1 [-DataPath 'D:\OpenLPPortable\Data']
+
+param(
+    [string]$DataPath = ''
+)
 
 $ErrorActionPreference = 'Stop'
 
-$SourceContrib = Join-Path $PSScriptRoot '.'
-$TargetContrib = Join-Path $env:APPDATA 'openlp\data\contrib'
+. (Join-Path $PSScriptRoot 'install-lib.ps1')
 
-if (-not (Test-Path (Join-Path $env:APPDATA 'openlp\data'))) {
-    Write-Host 'Brak folderu danych OpenLP — uruchom OpenLP raz i powtórz instalację.'
+$SourceContrib = Join-Path $PSScriptRoot '.'
+$dataRoot = Resolve-OpenLPDataDir -DataPath $DataPath
+
+if (-not $dataRoot) {
+    Write-OpenLPDataDirHelp
     exit 1
 }
 
+$TargetContrib = Join-Path $dataRoot 'contrib'
 New-Item -ItemType Directory -Force -Path $TargetContrib | Out-Null
 
-# Copy package init files and the songstats plugin (merge with existing contrib content).
 $itemsToCopy = @(
     (Join-Path $SourceContrib '__init__.py'),
     (Join-Path $SourceContrib 'plugins')
 )
 
 foreach ($item in $itemsToCopy) {
-    if (-not (Test-Path $item)) {
+    if (-not (Test-Path -LiteralPath $item)) {
         Write-Error "Missing: $item"
     }
-    Copy-Item -Path $item -Destination $TargetContrib -Recurse -Force
+    Copy-Item -LiteralPath $item -Destination $TargetContrib -Recurse -Force
 }
 
 $pluginPath = Join-Path $TargetContrib 'plugins\songstats\songstatsplugin.py'
-Write-Host 'Zainstalowano wtyczkę KWCH Świętochłowice.'
+Write-Host 'Zainstalowano wtyczke KWCH Swietochlowice.'
 Write-Host "Plik: $pluginPath"
-Write-Host 'Zrestartuj OpenLP → Ustawienia → Zarządzaj wtyczkami → włącz „KWCH Swietochlowice plugin”.'
+Write-Host 'Zrestartuj OpenLP -> Ustawienia -> Zarzadzaj wtyczkami -> wlacz KWCH Swietochlowice plugin.'
