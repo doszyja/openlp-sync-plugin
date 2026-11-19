@@ -502,8 +502,16 @@ class SyncHeaderWidget(QtCore.QObject):
             button_icons_only = density >= _DENSITY_HIDE_CHIPS
             account_icons_only = density >= _DENSITY_HIDE_CHIPS
         else:
+            has_token = bool(
+                self._status_panel_args.get('has_token')
+                if self._status_panel_args
+                else False
+            )
             button_icons_only = icons_only or density >= _DENSITY_COMPACT
-            account_icons_only = icons_only or density >= _DENSITY_MINIMAL
+            if not has_token:
+                account_icons_only = density >= _DENSITY_HIDE_CHIPS
+            else:
+                account_icons_only = icons_only or density >= _DENSITY_MINIMAL
         self._set_action_button_style(
             icon_only=button_icons_only,
             account_icon_only=account_icons_only,
@@ -726,12 +734,15 @@ class SyncHeaderWidget(QtCore.QObject):
 
     @staticmethod
     def _versions_differ(remote_version, local_version):
+        from contrib.plugins.songstats.lib.catalogstate import strip_drift_suffix
+
         if not remote_version or not local_version:
             return False
+        local_cmp = strip_drift_suffix(local_version)
         try:
-            return int(remote_version) != int(local_version)
+            return int(remote_version) != int(local_cmp)
         except (TypeError, ValueError):
-            return remote_version != local_version
+            return remote_version != local_cmp
 
     def _request_account_avatar(self, url):
         url = (url or '').strip()
@@ -893,11 +904,37 @@ class SyncHeaderWidget(QtCore.QObject):
         self._act_login.setVisible(not has_token)
         self._act_logout.setVisible(bool(has_token))
 
+        local_drift = bool(self._status_panel_args.get('local_catalog_drift'))
+
         if has_token and account_name and (wide or not compact):
             fm = self.account_button.fontMetrics()
             self.account_button.setText(
                 fm.elidedText(account_name, QtCore.Qt.ElideRight, 160)
             )
+        elif not has_token:
+            label = translate('SongStatsPlugin', 'Niezalogowany')
+            if local_drift:
+                label = translate(
+                    'SongStatsPlugin',
+                    'Niezalogowany · lokalnie ⚠',
+                )
+            fm = self.account_button.fontMetrics()
+            max_w = 130 if compact else 200
+            self.account_button.setText(
+                fm.elidedText(label, QtCore.Qt.ElideRight, max_w)
+            )
+            tip = translate(
+                'SongStatsPlugin',
+                'Nie jesteś zalogowany na KWCH.\n'
+                'Zapis pieśni zostaje w OpenLP; na stronie serwera nie trafia bez logowania.\n\n'
+                'Menu → Zaloguj przez przeglądarkę (Discord).',
+            )
+            if local_drift:
+                tip += '\n\n' + translate(
+                    'SongStatsPlugin',
+                    'Masz lokalne zmiany poza synchronizacją z serwerem.',
+                )
+            self.account_button.setToolTip(tip)
         else:
             self.account_button.setText('')
 
@@ -924,7 +961,12 @@ class SyncHeaderWidget(QtCore.QObject):
                     qta.icon('mdi.account-circle-outline', color='#2e7d32')
                 )
             else:
-                self.account_button.setIcon(_themed_icon('authentication'))
+                self.account_button.setIcon(
+                    qta.icon('mdi.account-alert-outline', color='#e65100')
+                )
+                self.account_button.setToolButtonStyle(
+                    QtCore.Qt.ToolButtonTextBesideIcon
+                )
         self._update_account_menu_header(has_token, account_name)
 
     def update_status_panel(
@@ -937,6 +979,8 @@ class SyncHeaderWidget(QtCore.QObject):
         version_checking=False,
         account_name='',
         account_avatar_url='',
+        local_catalog_drift=False,
+        local_drift_reason='',
     ):
         if version_checking:
             self.set_version_checking(True)
@@ -953,6 +997,8 @@ class SyncHeaderWidget(QtCore.QObject):
             version_checking=False,
             account_name=account_name or '',
             account_avatar_url=account_avatar_url or '',
+            local_catalog_drift=bool(local_catalog_drift),
+            local_drift_reason=local_drift_reason or '',
         )
         if not has_token:
             self._avatar_url = ''
@@ -989,7 +1035,27 @@ class SyncHeaderWidget(QtCore.QObject):
         else:
             local_line = translate('SongStatsPlugin', 'Lokalnie: brak')
 
-        db_tip = '{remote} · {local}'.format(remote=remote_line, local=local_line)
+        local_drift = bool(args.get('local_catalog_drift'))
+        drift_reason = (args.get('local_drift_reason') or '').strip()
+        if local_drift:
+            drift_note = translate(
+                'SongStatsPlugin',
+                'Lokalna baza ma zmiany, których nie ma na serwerze (wersja lokalna z ⚠).',
+            )
+            db_tip = '{base}\n{drift}'.format(
+                base='{remote} · {local}'.format(remote=remote_line, local=local_line),
+                drift=drift_note,
+            )
+        else:
+            db_tip = '{remote} · {local}'.format(remote=remote_line, local=local_line)
+        if not has_token:
+            db_tip = '{base}\n{auth}'.format(
+                base=db_tip,
+                auth=translate(
+                    'SongStatsPlugin',
+                    'Brak logowania — serwer KWCH nie odbiera lokalnych zapisów.',
+                ),
+            )
         if compact:
             if remote_version and local_version:
                 db_value = 'S{0}·L{1}'.format(remote_version, local_version)
@@ -1018,7 +1084,7 @@ class SyncHeaderWidget(QtCore.QObject):
             else:
                 db_value = '—'
 
-        if self._versions_differ(remote_version, local_version):
+        if local_drift or self._versions_differ(remote_version, local_version):
             db_icon = _themed_icon('database', color='orange')
         elif remote_version and local_version:
             db_icon = _themed_icon('database', color='green')
@@ -1029,7 +1095,7 @@ class SyncHeaderWidget(QtCore.QObject):
             db_icon,
             translate('SongStatsPlugin', 'Baza'),
             db_value,
-            '',
+            db_tip,
             compact=compact,
             icon_only=icons_only,
         )

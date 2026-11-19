@@ -54,7 +54,7 @@ Po instalacji: restart OpenLP → Plugin Manager → **KWCH Swietochlowice plugi
 ## Funkcje (songstats)
 
 - **Live**: `slidecontroller_live_started` + pieśń → wątek `POST /presentation-events` (także bez JWT; `songstats/openlp client id`).
-- **Sync**: wersja katalogu, pull JSON/SQLite; push po edycji gdy API wymaga tokenu.
+- **Sync**: wersja katalogu, pull JSON/SQLite; push po edycji gdy API wymaga tokenu. **Drift** (`local catalog drift` + ⚠ przy wersji lokalnej) gdy edycja/usunięcie nie trafiły na serwer — licznik `local db version` bez sztucznego +1. Przy **Synchronizuj** / **Sprawdź aktualizacje** z ⚠: modal — wyślij lokalne (bulk PATCH/POST) lub odrzuć lokalne (pełny `all-openlp` / SQLite).
 - **Konto**: OAuth `/auth/openlp`, profil/avatar `GET /auth/me`.
 
 ## Struktura repozytorium

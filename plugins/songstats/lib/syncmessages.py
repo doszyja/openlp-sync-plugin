@@ -22,6 +22,13 @@ def explain_sync_error(raw_detail):
             'Zaloguj się kontem z aplikacji webowej KWCH (menu Konto w pasku u góry '
             'lub ustawienia wtyczki).',
         )
+    elif '403' in text and ('uprawnie' in lower or 'edit' in lower or 'permission' in lower):
+        body = translate(
+            'SongStatsPlugin',
+            'Konto nie ma uprawnień do edycji pieśni na serwerze.\n\n'
+            'Na Discordzie KWCH potrzebna jest rola pozwalająca edytować katalog. '
+            'Bez 2xx z PATCH zmiany i wpisy audytu nie trafiają do bazy.',
+        )
     elif '401' in text or '403' in text or 'odrzucił' in lower or 'rejected' in lower:
         body = translate(
             'SongStatsPlugin',

@@ -136,6 +136,10 @@ class SongStatsTab(SettingsTab):
         sync_v = QtWidgets.QVBoxLayout(self.sync_group_box)
         self.push_on_edit_check_box = QtWidgets.QCheckBox(self.sync_group_box)
         sync_v.addWidget(self.push_on_edit_check_box)
+        self.delete_hint_label = QtWidgets.QLabel(self.sync_group_box)
+        self.delete_hint_label.setWordWrap(True)
+        self.delete_hint_label.setStyleSheet('color: palette(mid); margin: 0;')
+        sync_v.addWidget(self.delete_hint_label)
 
         self.sync_layout = QtWidgets.QFormLayout()
         self.sync_layout.setFieldGrowthPolicy(
@@ -189,6 +193,13 @@ class SongStatsTab(SettingsTab):
             translate(
                 'SongStatsPlugin.SongStatsTab',
                 'Po zapisie pieśni wyślij ją na serwer',
+            )
+        )
+        self.delete_hint_label.setText(
+            translate(
+                'SongStatsPlugin.SongStatsTab',
+                'Usunięcie pieśni w OpenLP nie usuwa jej na serwerze — tylko administrator '
+                'może skasować pieśń w panelu KWCH. Lokalne zmiany bez wysyłki: ⚠ przy wersji lokalnej.',
             )
         )
         self.sync_pull_mode_label.setText(translate('SongStatsPlugin.SongStatsTab', 'Tryb pobierania:'))

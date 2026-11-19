@@ -24,6 +24,67 @@ from contrib.plugins.songstats.lib.apiutil import (
 log = logging.getLogger(__name__)
 
 
+def describe_push_http_error(response):
+    """Short user- and log-friendly message from a failed push response."""
+    status = response.status_code
+    if status == 403:
+        return (
+            'Push rejected (403): brak uprawnień do edycji pieśni na serwerze '
+            '(wymagana rola edycji na Discordzie KWCH).'
+        )
+    if status == 404:
+        return (
+            'Push rejected (404): pieśni nie ma w bazie serwera — '
+            'zrób synchronizację lub sprawdź songstats:remote_id w komentarzach.'
+        )
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            message = data.get('message')
+            if isinstance(message, list):
+                detail = '; '.join(str(part) for part in message if part)
+                if detail:
+                    return 'Push rejected (HTTP {code}): {detail}'.format(code=status, detail=detail)
+            if message:
+                return 'Push rejected (HTTP {code}): {detail}'.format(
+                    code=status, detail=str(message)
+                )
+    except ValueError:
+        pass
+    snippet = (response.text or '').strip()
+    if snippet:
+        snippet = snippet[:400]
+        return 'Push rejected (HTTP {code}): {detail}'.format(code=status, detail=snippet)
+    return 'Push rejected (HTTP {code})'.format(code=status)
+
+
+def push_summary_had_upload(summary):
+    """True when MasterApiPushWorker summary reports at least one created/updated row."""
+    text = (summary or '').strip().lower()
+    if not text:
+        return False
+    parts = {}
+    for chunk in text.split(','):
+        chunk = chunk.strip()
+        if '=' not in chunk:
+            continue
+        key, _, value = chunk.partition('=')
+        parts[key.strip()] = value.strip()
+    try:
+        if int(parts.get('errors', '0') or '0') > 0:
+            return False
+    except ValueError:
+        pass
+    try:
+        if int(parts.get('created', '0') or '0') > 0:
+            return True
+        if int(parts.get('updated', '0') or '0') > 0:
+            return True
+    except ValueError:
+        pass
+    return False
+
+
 def parse_songs_response(response):
     """
     Returns (songs, version, deleted_song_ids, incremental_full_fallback).
@@ -196,6 +257,7 @@ class MasterApiPushWorker(ThreadWorker):
             return
 
         total = len(self._operations)
+        last_error = None
         try:
             for position, op in enumerate(self._operations, start=1):
                 self.push_progress.emit(position, total)
@@ -217,6 +279,13 @@ class MasterApiPushWorker(ThreadWorker):
                             proxies=get_proxy_settings(),
                             timeout=get_request_timeouts(settings),
                         )
+                    elif method == 'DELETE':
+                        log.warning(
+                            'KWCH: ignoring DELETE %s (server delete is admin-only on web)',
+                            op['url'],
+                        )
+                        skipped += 1
+                        continue
                     else:
                         skipped += 1
                         continue
@@ -228,7 +297,14 @@ class MasterApiPushWorker(ThreadWorker):
                         return
                     if response.status_code >= 400:
                         errors += 1
-                        log.warning('Push %s %s -> %s', method, op['url'], response.status_code)
+                        last_error = describe_push_http_error(response)
+                        log.warning(
+                            'Push %s %s -> %s: %s',
+                            method,
+                            op['url'],
+                            response.status_code,
+                            last_error,
+                        )
                         continue
 
                     if method == 'POST':
@@ -249,6 +325,13 @@ class MasterApiPushWorker(ThreadWorker):
                 except OSError:
                     errors += 1
                     log.exception('Push request failed for %s', op['url'])
+
+            if errors > 0 and created + updated == 0:
+                self.push_failed.emit(
+                    last_error
+                    or 'Push failed: {e} error(s), nothing uploaded.'.format(e=errors)
+                )
+                return
 
             summary = 'created={c}, updated={u}, errors={e}, skipped={s}'.format(
                 c=created, u=updated, e=errors, s=skipped

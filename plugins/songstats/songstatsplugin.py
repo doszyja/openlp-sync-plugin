@@ -28,8 +28,27 @@ from contrib.plugins.songstats.lib.apiutil import (
     persist_auth_profile,
     build_presentation_event_payload,
     ensure_openlp_client_id,
+    resolve_full_catalog_pull_url,
     resolve_stats_url,
     resolve_sync_urls,
+)
+from contrib.plugins.songstats.lib.syncdrift import (
+    CHOICE_CANCEL,
+    CHOICE_DISCARD,
+    CHOICE_PUSH,
+    prompt_local_drift_resolution,
+)
+from contrib.plugins.songstats.lib.catalogstate import (
+    REASON_DELETED_LOCAL,
+    REASON_EDIT_NOT_PUSHED,
+    REASON_EDIT_NO_TOKEN,
+    REASON_PUSH_FAILED,
+    apply_catalog_version_from_server,
+    clear_local_catalog_drift,
+    drift_reason,
+    is_local_catalog_drifted,
+    local_catalog_version_for_display,
+    mark_local_catalog_drift,
 )
 from contrib.plugins.songstats.lib.pluginutil import get_remote_id, get_songs_manager
 from contrib.plugins.songstats.lib.syncmessages import explain_sync_error
@@ -62,6 +81,7 @@ class SongStatsPlugin(Plugin):
         self._suppress_song_push = False
         self._suppress_live_stats = False
         self._push_in_progress = False
+        self._bulk_push_in_progress = False
         self._version_check_in_progress = False
         self._account_profile_fetch_done = False
         self._last_import_summary = ''
@@ -220,6 +240,7 @@ class SongStatsPlugin(Plugin):
         super(SongStatsPlugin, self).initialise()
         Registry().register_function('slidecontroller_live_started', self.on_live_started)
         Registry().register_function('song_changed', self.on_local_song_saved)
+        Registry().register_function('song_deleted', self.on_local_song_deleted)
         if self.sync_songs_action:
             self.sync_songs_action.setVisible(True)
         self._ensure_sync_header()
@@ -230,6 +251,7 @@ class SongStatsPlugin(Plugin):
     def finalise(self):
         Registry().remove_function('slidecontroller_live_started', self.on_live_started)
         Registry().remove_function('song_changed', self.on_local_song_saved)
+        Registry().remove_function('song_deleted', self.on_local_song_deleted)
         if self.sync_songs_action:
             self.sync_songs_action.setVisible(False)
         if self.sync_header_widget:
@@ -273,9 +295,9 @@ class SongStatsPlugin(Plugin):
         return master > local
 
     def _catalog_versions_for_display(self):
-        local_raw = (self.settings.value('songstats/local db version') or '').strip()
         master_raw = (self.settings.value('songstats/master db version') or '').strip()
-        return master_raw or '', local_raw or ''
+        local_display = local_catalog_version_for_display(self.settings)
+        return master_raw or '', local_display
 
     def _mark_sync_started(self, message=None):
         self._sync_cancelled = False
@@ -296,6 +318,7 @@ class SongStatsPlugin(Plugin):
         if success and version is not None:
             self.settings.setValue('songstats/local db version', str(version))
             self.settings.setValue('songstats/master db version', str(version))
+            clear_local_catalog_drift(self.settings)
         if self.sync_header_widget:
             self.sync_header_widget.hide_progress()
         self._refresh_sync_header_display()
@@ -309,17 +332,70 @@ class SongStatsPlugin(Plugin):
                 translate('SongStatsPlugin', 'Anulowanie po bieżącym kroku…')
             )
 
+    @staticmethod
+    def _push_on_edit_enabled(settings):
+        value = settings.value('songstats/push on edit', True)
+        if value is False or value == 0:
+            return False
+        if isinstance(value, str) and value.strip().lower() in ('false', '0', 'no', 'off'):
+            return False
+        return True
+
+    def _run_after_edit_dialog_closed(self, callback):
+        """Edit song form is modal; defer dialogs until after QDialog.accept()."""
+        QtCore.QTimer.singleShot(50, callback)
+
+    def _show_save_skipped_not_logged_in_dialog(self):
+        window = self.main_window or Registry().get('main_window')
+        if not window:
+            log.warning('KWCH: not-logged-in save dialog skipped (main_window unavailable)')
+            return
+        window.warning_message(
+            translate('SongStatsPlugin', 'Pieśń nie zostanie zapisana na stronie KWCH'),
+            translate(
+                'SongStatsPlugin',
+                'Pieśń została zapisana w OpenLP na tym komputerze.\n\n'
+                'Na stronie internetowej KWCH (serwerze) nie została zapisana, '
+                'ponieważ nie jesteś zalogowany.\n\n'
+                'Aby wysyłać zmiany na serwer: menu u góry → Konto → '
+                'Zaloguj przez przeglądarkę (Discord).\n\n'
+                'Lokalny katalog oznaczono jako poza synchronizacją (⚠ przy wersji lokalnej).',
+            ),
+        )
+
+    def on_local_song_deleted(self, song_id):
+        """Usunięcie w OpenLP jest tylko lokalne — DELETE na serwerze tylko dla admina KWCH."""
+        if not self.is_active():
+            return
+        log.debug(
+            'KWCH: pieśń %s usunięta lokalnie w OpenLP — bez żądania DELETE na serwerze',
+            song_id,
+        )
+        mark_local_catalog_drift(self.settings, REASON_DELETED_LOCAL)
+        self._refresh_sync_header_display()
+
     def on_local_song_saved(self, song_id):
         if not self.is_active():
             return
         if self._sync_in_progress or self._suppress_song_push or self._push_in_progress:
             return
-        if self.settings.value('songstats/push on edit', True) is False:
+        from openlp.plugins.songs.lib.db import Song
+
+        manager = get_songs_manager()
+        if not manager or not manager.get_object(Song, song_id):
+            log.debug('KWCH: pomijam wysyłkę — pieśń %s już nie istnieje lokalnie', song_id)
             return
         from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
 
         if not MasterApiPushWorker.settings_has_token(self.settings):
             log.debug('KWCH: skip upload — no API token')
+            mark_local_catalog_drift(self.settings, REASON_EDIT_NO_TOKEN)
+            self._refresh_sync_header_display()
+            self._run_after_edit_dialog_closed(self._show_save_skipped_not_logged_in_dialog)
+            return
+        if not self._push_on_edit_enabled(self.settings):
+            mark_local_catalog_drift(self.settings, REASON_EDIT_NOT_PUSHED)
+            self._refresh_sync_header_display()
             return
         _, songs_api_base, _ = resolve_sync_urls(self.settings)
         if not songs_api_base:
@@ -348,16 +424,53 @@ class SongStatsPlugin(Plugin):
         worker.push_failed.connect(self._on_edit_push_failed)
         run_thread(worker, 'songstats-edit-push-{uid}'.format(uid=uuid.uuid4().hex[:8]), can_start=True)
 
-    def _on_edit_push_succeeded(self, post_results, _summary):
+    def _on_edit_push_succeeded(self, post_results, summary):
         from contrib.plugins.songstats.lib.songsync import apply_push_response_ids
+        from contrib.plugins.songstats.lib.synchttp import push_summary_had_upload
 
         self._push_in_progress = False
         manager = get_songs_manager()
         if manager and post_results:
             apply_push_response_ids(manager, post_results)
+        summary_lower = (summary or '').lower()
+        if 'updated=0' in summary_lower and 'created=0' in summary_lower and 'errors=' in summary_lower:
+            err_part = summary.split('errors=', 1)[-1].split(',')[0].strip()
+            if err_part and err_part != '0':
+                self._on_edit_push_failed(
+                    translate(
+                        'SongStatsPlugin',
+                        'Wysyłka po zapisie: nic nie zaktualizowano ({summary}).',
+                    ).format(summary=summary)
+                )
+                return
+        if push_summary_had_upload(summary):
+            log.info('KWCH: song pushed after local edit (%s)', summary)
+            self._fetch_catalog_version_after_push()
+
+    def _fetch_catalog_version_after_push(self):
+        """GET /songs/version after successful PATCH/POST — server bumps catalog version."""
+        from contrib.plugins.songstats.lib.synchttp import SongVersionWorker
+
+        worker = SongVersionWorker()
+        worker.version_succeeded.connect(self._on_catalog_version_after_push)
+        worker.version_failed.connect(self._on_catalog_version_after_push_failed)
+        run_thread(
+            worker,
+            'songstats-post-push-version-{uid}'.format(uid=uuid.uuid4().hex[:8]),
+            can_start=True,
+        )
+
+    def _on_catalog_version_after_push(self, version):
+        apply_catalog_version_from_server(self.settings, version)
+        self._refresh_sync_header_display()
+
+    def _on_catalog_version_after_push_failed(self, message):
+        log.warning('KWCH: catalog version not refreshed after push: %s', message)
 
     def _on_edit_push_failed(self, message):
         self._push_in_progress = False
+        mark_local_catalog_drift(self.settings, REASON_PUSH_FAILED)
+        self._refresh_sync_header_display()
         log.warning('KWCH upload after edit failed: %s', message)
         title, body = explain_sync_error(message)
         self.main_window.warning_message(
@@ -420,6 +533,8 @@ class SongStatsPlugin(Plugin):
             version_checking=self._version_check_in_progress,
             account_name=identity.get('name') or '',
             account_avatar_url=identity.get('avatar_url') or '',
+            local_catalog_drift=is_local_catalog_drifted(self.settings),
+            local_drift_reason=drift_reason(self.settings),
         )
         if has_token:
             from contrib.plugins.songstats.lib.apiutil import needs_account_profile_from_api
@@ -464,17 +579,149 @@ class SongStatsPlugin(Plugin):
         persist_auth_profile(self.settings, token, profile=identity)
         self._refresh_sync_header_display()
 
-    def on_check_catalog_updates(self):
+    def _main_window_for_dialog(self):
+        return self.main_window or Registry().get('main_window')
+
+    def _has_api_token(self):
+        from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
+
+        return MasterApiPushWorker.settings_has_token(self.settings)
+
+    def _ask_drift_resolution_if_needed(self):
+        if not is_local_catalog_drifted(self.settings):
+            return True
+        parent = self._main_window_for_dialog()
+        if not parent:
+            return False
+        choice = prompt_local_drift_resolution(
+            parent, self.settings, self._has_api_token()
+        )
+        if choice is CHOICE_CANCEL:
+            return False
+        if choice is CHOICE_PUSH:
+            self._push_all_local_songs(self._run_catalog_version_check)
+            return False
+        if choice is CHOICE_DISCARD:
+            self._start_catalog_pull(discard_local=True)
+            return False
+        return False
+
+    def _push_all_local_songs(self, continuation):
+        if (
+            self._bulk_push_in_progress
+            or self._push_in_progress
+            or self._sync_in_progress
+        ):
+            return
+        if not self._has_api_token():
+            window = self._main_window_for_dialog()
+            if window:
+                window.warning_message(
+                    translate('SongStatsPlugin', 'Brak logowania'),
+                    translate(
+                        'SongStatsPlugin',
+                        'Wysyłka wymaga zalogowania kontem KWCH (menu Konto).',
+                    ),
+                )
+            return
+        manager = get_songs_manager()
+        _, songs_api_base, _ = resolve_sync_urls(self.settings)
+        if not manager or not songs_api_base:
+            return
+        from contrib.plugins.songstats.lib.songsync import build_push_operations
+        from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
+
+        try:
+            operations = build_push_operations(
+                manager, self.settings, songs_api_base, self._remote_index
+            )
+        except Exception:
+            log.exception('KWCH: build_push_operations failed')
+            return
+        if not operations:
+            continuation()
+            return
+        self._bulk_push_in_progress = True
+        if self.sync_header_widget:
+            self.sync_header_widget.set_sync_busy(True)
+            self._mark_sync_started(
+                translate('SongStatsPlugin', 'Wysyłanie lokalnych pieśni na serwer…')
+            )
+        worker = MasterApiPushWorker(operations)
+
+        def on_ok(results, summary):
+            self._on_bulk_push_finished(results, summary, continuation, failed=False)
+
+        def on_fail(message):
+            self._on_bulk_push_finished(None, message, continuation, failed=True)
+
+        worker.push_succeeded.connect(on_ok)
+        worker.push_failed.connect(on_fail)
+        run_thread(
+            worker,
+            'songstats-bulk-push-{uid}'.format(uid=uuid.uuid4().hex[:8]),
+            can_start=True,
+        )
+
+    def _on_bulk_push_finished(self, post_results, summary_or_error, continuation, failed):
+        from contrib.plugins.songstats.lib.songsync import apply_push_response_ids
+        from contrib.plugins.songstats.lib.synchttp import push_summary_had_upload
+
+        self._bulk_push_in_progress = False
+        if self.sync_header_widget:
+            self.sync_header_widget.set_sync_busy(False)
+            self.sync_header_widget.hide_progress()
+        manager = get_songs_manager()
+        if failed:
+            mark_local_catalog_drift(self.settings, REASON_PUSH_FAILED)
+            self._refresh_sync_header_display()
+            title, body = explain_sync_error(str(summary_or_error))
+            window = self._main_window_for_dialog()
+            if window:
+                window.warning_message(
+                    translate('SongStatsPlugin', 'Wysyłka katalogu nie powiodła się'),
+                    body or title,
+                )
+            return
+        if manager and post_results:
+            apply_push_response_ids(manager, post_results)
+        summary = summary_or_error or ''
+        if push_summary_had_upload(summary):
+            self._fetch_catalog_version_after_push()
+        summary_lower = summary.lower()
+        if 'errors=' in summary_lower:
+            err = summary.split('errors=', 1)[-1].split(',')[0].strip()
+            try:
+                if int(err) > 0:
+                    mark_local_catalog_drift(self.settings, REASON_PUSH_FAILED)
+                    self._refresh_sync_header_display()
+                    window = self._main_window_for_dialog()
+                    if window:
+                        window.warning_message(
+                            translate('SongStatsPlugin', 'Wysyłka katalogu częściowo nieudana'),
+                            translate(
+                                'SongStatsPlugin',
+                                'Niektóre pieśni nie trafiły na serwer ({summary}).',
+                            ).format(summary=summary),
+                        )
+                    return
+            except ValueError:
+                pass
+        continuation()
+
+    def _run_catalog_version_check(self):
         if self._sync_in_progress or self._version_check_in_progress:
             return
         from contrib.plugins.songstats.lib.apiutil import resolve_version_url
         from contrib.plugins.songstats.lib.synchttp import SongVersionWorker
 
         if not resolve_version_url(self.settings):
-            self.main_window.warning_message(
-                translate('SongStatsPlugin', 'Synchronizacja pieśni nie powiodła się'),
-                translate('SongStatsPlugin', 'Ustaw adres API w konfiguracji wtyczki KWCH.'),
-            )
+            window = self._main_window_for_dialog()
+            if window:
+                window.warning_message(
+                    translate('SongStatsPlugin', 'Synchronizacja pieśni nie powiodła się'),
+                    translate('SongStatsPlugin', 'Ustaw adres API w konfiguracji wtyczki KWCH.'),
+                )
             return
 
         self._version_check_in_progress = True
@@ -488,6 +735,14 @@ class SongStatsPlugin(Plugin):
             'songstats-version-check-{uid}'.format(uid=uuid.uuid4().hex[:8]),
             can_start=True,
         )
+
+    def on_check_catalog_updates(self):
+        if self._sync_in_progress or self._version_check_in_progress:
+            return
+        if is_local_catalog_drifted(self.settings):
+            if not self._ask_drift_resolution_if_needed():
+                return
+        self._run_catalog_version_check()
 
     def _on_version_check_succeeded(self, version):
         self._version_check_in_progress = False
@@ -530,9 +785,42 @@ class SongStatsPlugin(Plugin):
     def on_synchronize_songs(self):
         if self._sync_in_progress:
             return
+        if is_local_catalog_drifted(self.settings):
+            parent = self._main_window_for_dialog()
+            if not parent:
+                return
+            choice = prompt_local_drift_resolution(
+                parent, self.settings, self._has_api_token()
+            )
+            if choice is CHOICE_CANCEL:
+                return
+            if choice is CHOICE_PUSH:
+                self._push_all_local_songs(self._continue_sync_after_bulk_push)
+                return
+            if choice is CHOICE_DISCARD:
+                self._start_catalog_pull(discard_local=True)
+                return
         if not self._catalog_update_available():
             self.on_check_catalog_updates()
             return
+        self._start_catalog_pull(discard_local=False)
+
+    def _continue_sync_after_bulk_push(self):
+        if self._catalog_update_available():
+            self._start_catalog_pull(discard_local=False)
+        else:
+            self._run_catalog_version_check()
+            window = self._main_window_for_dialog()
+            if window:
+                window.information_message(
+                    translate('SongStatsPlugin', 'Wysyłka zakończona'),
+                    translate(
+                        'SongStatsPlugin',
+                        'Lokalne pieśni wysłano na serwer. Wersja katalogu została odświeżona.',
+                    ),
+                )
+
+    def _start_catalog_pull(self, discard_local=False):
         manager = get_songs_manager()
         if manager is None:
             self.main_window.warning_message(
@@ -545,6 +833,8 @@ class SongStatsPlugin(Plugin):
         from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
 
         pull_url, songs_api_base, pull_mode = resolve_sync_urls(self.settings)
+        if discard_local:
+            pull_url, pull_mode = resolve_full_catalog_pull_url(self.settings)
         if json_pull_requires_auth(self.settings) and not MasterApiPushWorker.settings_has_token(
             self.settings
         ):
@@ -581,6 +871,11 @@ class SongStatsPlugin(Plugin):
             start_msg = translate(
                 'SongStatsPlugin',
                 'Pobieranie pełnej bazy SQLite (pierwsza synchronizacja)…',
+            )
+        elif discard_local:
+            start_msg = translate(
+                'SongStatsPlugin',
+                'Pobieranie pełnego katalogu z serwera (odrzucenie lokalnych zmian)…',
             )
         else:
             start_msg = translate('SongStatsPlugin', 'Pobieranie katalogu z serwera…')

@@ -653,15 +653,18 @@ def openlp_song_to_master_dto(song, settings):
             'clientId': client_id,
         },
     }
-    songbook_name = (settings.value('songstats/default songbook') or '').strip()
-    if songbook_name:
-        dto['songbook'] = {'name': songbook_name}
+    songbook = (settings.value('songstats/default songbook') or '').strip()
+    if songbook:
+        # API expects slug string ('pielgrzym', 'zielony', …), not {name: …}
+        dto['songbook'] = songbook
     return dto
 
 
 def build_push_operations(manager, settings, songs_api_base, remote_index):
     """
     Build HTTP operations for Openlp-database: PATCH /songs/:id or POST /songs.
+
+    Never DELETE — removing a song from the master catalog is admin-only on KWCH web.
     remote_index: dict remote_id -> cache item from last pull (optional).
     """
     operations = []
@@ -695,7 +698,7 @@ def build_push_operations(manager, settings, songs_api_base, remote_index):
 
 
 def build_push_operation_for_song(manager, settings, songs_api_base, song_id, remote_index=None):
-    """Single-song upload after OpenLP edit (POST or PATCH /songs)."""
+    """Single-song upload after OpenLP edit (POST or PATCH /songs). No DELETE."""
     song = manager.get_object(Song, song_id)
     if not song or song.temporary:
         return None

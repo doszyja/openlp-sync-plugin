@@ -114,6 +114,19 @@ def json_pull_requires_auth(settings):
     return 'all-openlp' in pull_l or 'songs/changes' in pull_l
 
 
+def resolve_full_catalog_pull_url(settings):
+    """
+    Full catalog fetch to overwrite local drift (all-openlp or SQLite dump).
+    """
+    api_base = get_api_base(settings)
+    if not api_base:
+        return '', SYNC_PULL_JSON
+    mode = get_sync_pull_mode(settings)
+    if mode == SYNC_PULL_SQLITE:
+        return urljoin(api_base + '/', 'songs/export/sqlite'), SYNC_PULL_SQLITE
+    return urljoin(api_base + '/', 'songs/all-openlp'), SYNC_PULL_JSON
+
+
 def resolve_sync_urls(settings):
     """
     Return (pull_url, songs_api_base, pull_mode).
