@@ -5,7 +5,7 @@ Synchronizacja pieśni i statystyki live z [KWCH Świętochłowice](https://pies
 **Instalacja (PowerShell, jedna linia):**
 
 ```powershell
-$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
+$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'; Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; Invoke-WebRequest -UseBasicParsing -Headers @{ 'Cache-Control' = 'no-cache' } -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
 ```
 
 Z klonu: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1`
