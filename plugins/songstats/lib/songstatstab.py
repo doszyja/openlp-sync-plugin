@@ -122,8 +122,11 @@ class SongStatsTab(SettingsTab):
         self.login_button.clicked.connect(self.on_browser_login)
         self.logout_button = QtWidgets.QPushButton(self.api_group_box)
         self.logout_button.clicked.connect(self.on_logout)
+        self.clear_cache_button = QtWidgets.QPushButton(self.api_group_box)
+        self.clear_cache_button.clicked.connect(self.on_clear_cache)
         login_row.addWidget(self.login_button, 0)
         login_row.addWidget(self.logout_button, 0)
+        login_row.addWidget(self.clear_cache_button, 0)
         login_row.addStretch(1)
         api_v.addLayout(login_row)
         self.login_status_label = QtWidgets.QLabel(self.api_group_box)
@@ -186,6 +189,16 @@ class SongStatsTab(SettingsTab):
         )
         self.logout_button.setText(
             translate('SongStatsPlugin.SongStatsTab', 'Wyloguj')
+        )
+        self.clear_cache_button.setText(
+            translate('SongStatsPlugin.SongStatsTab', 'Wyczyść cache')
+        )
+        self.clear_cache_button.setToolTip(
+            translate(
+                'SongStatsPlugin.SongStatsTab',
+                'Usuwa zapamiętane wersje katalogu, datę synchronizacji i profil '
+                '(nazwa, avatar). Nie wylogowuje i nie kasuje pieśni.',
+            )
         )
 
         self.sync_group_box.setTitle(translate('SongStatsPlugin.SongStatsTab', 'Synchronizacja pieśni'))
@@ -276,6 +289,35 @@ class SongStatsTab(SettingsTab):
         plugin = Registry().get('song_stats_plugin')
         if plugin and hasattr(plugin, '_refresh_sync_header_display'):
             plugin._refresh_sync_header_display()
+
+    def on_clear_cache(self):
+        self._ensure_ui()
+        plugin = Registry().get('song_stats_plugin')
+        if plugin and hasattr(plugin, '_on_kwch_clear_cache'):
+            if plugin._on_kwch_clear_cache(parent=self):
+                token = (self.settings.value('songstats/api token') or '').strip()
+                self._update_login_buttons(token)
+            return
+        from contrib.plugins.songstats.lib.apiutil import clear_plugin_cache
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            translate('SongStatsPlugin.SongStatsTab', 'Wyczyść cache'),
+            translate(
+                'SongStatsPlugin.SongStatsTab',
+                'Zostaną usunięte zapamiętane wersje katalogu, data ostatniej '
+                'synchronizacji oraz zapisany profil (nazwa, avatar).\n\n'
+                'Logowanie, ustawienia i pieśni w OpenLP zostaną.\n\n'
+                'Kontynuować?',
+            ),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        clear_plugin_cache(self.settings)
+        token = (self.settings.value('songstats/api token') or '').strip()
+        self._update_login_buttons(token)
 
     def on_browser_login(self):
         from contrib.plugins.songstats.lib.openlpauth import login_via_browser

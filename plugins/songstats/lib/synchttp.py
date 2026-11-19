@@ -229,6 +229,176 @@ class SongSyncSqlitePullWorker(ThreadWorker):
             self.quit.emit()
 
 
+class SingleSongOpenlpPushWorker(ThreadWorker):
+    """
+    Send a pre-built PUT /songs/openlp/save (DB reads stay on the Qt main thread).
+    """
+
+    push_succeeded = QtCore.pyqtSignal(object, str)
+    push_failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, operation):
+        super().__init__()
+        self._operation = operation
+
+    def start(self):
+        settings = Registry().get('settings')
+        if not self.settings_has_token(settings):
+            self.push_failed.emit(
+                'Push requires API token (log in via KWCH web). Upload skipped (no API token).'
+            )
+            self.quit.emit()
+            return
+        operation = self._operation
+        if not operation:
+            self.push_failed.emit(
+                'Brak operacji PUT (wewnętrzny błąd przygotowania wysyłki).'
+            )
+            self.quit.emit()
+            return
+        log.info(
+            'KWCH: PUT %s (openlp song id=%s)',
+            operation['url'],
+            operation.get('local_id'),
+        )
+        try:
+            post_results, summary, err = run_push_operations(settings, [operation])
+            if err:
+                self.push_failed.emit(err)
+            else:
+                self.push_succeeded.emit(post_results, summary)
+        except Exception as error:
+            log.exception('KWCH: edit push HTTP failed')
+            self.push_failed.emit(str(error))
+        finally:
+            self.quit.emit()
+
+    @staticmethod
+    def settings_has_token(settings):
+        from contrib.plugins.songstats.lib.apiutil import has_api_token
+
+        return has_api_token(settings)
+
+
+def run_push_operations(settings, operations, progress_callback=None):
+    """
+    Execute push ops; returns (post_results, summary, error_message_or_none).
+    """
+    headers = build_auth_headers(settings)
+    created = updated = errors = skipped = 0
+    post_results = []
+    total = len(operations or [])
+    last_error = None
+    if not operations:
+        return [], 'created=0, updated=0, errors=0, skipped=0', None
+    try:
+        for position, op in enumerate(operations, start=1):
+            if progress_callback:
+                progress_callback(position, total)
+            method = op['method']
+            try:
+                if method == 'PATCH':
+                    response = requests.patch(
+                        op['url'],
+                        json=op['body'],
+                        headers=headers,
+                        proxies=get_proxy_settings(),
+                        timeout=get_request_timeouts(settings),
+                    )
+                elif method == 'POST':
+                    response = requests.post(
+                        op['url'],
+                        json=op['body'],
+                        headers=headers,
+                        proxies=get_proxy_settings(),
+                        timeout=get_request_timeouts(settings),
+                    )
+                elif method == 'PUT':
+                    response = requests.put(
+                        op['url'],
+                        json=op['body'],
+                        headers=headers,
+                        proxies=get_proxy_settings(),
+                        timeout=get_request_timeouts(settings),
+                    )
+                elif method == 'DELETE':
+                    log.warning(
+                        'KWCH: ignoring DELETE %s (server delete is admin-only on web)',
+                        op['url'],
+                    )
+                    skipped += 1
+                    continue
+                else:
+                    skipped += 1
+                    continue
+
+                if response.status_code == 401:
+                    return (
+                        [],
+                        '',
+                        'Push rejected (401): zaloguj ponownie (KWCH Swietochlowice plugin → Połącz z kontem).',
+                    )
+                if response.status_code >= 400:
+                    errors += 1
+                    last_error = describe_push_http_error(response)
+                    log.warning(
+                        'Push %s %s -> %s: %s',
+                        method,
+                        op['url'],
+                        response.status_code,
+                        last_error,
+                    )
+                    continue
+
+                log.info(
+                    'KWCH: push %s %s -> HTTP %s (local openlp id=%s)',
+                    method,
+                    op['url'],
+                    response.status_code,
+                    op.get('local_id'),
+                )
+
+                if method == 'POST':
+                    created += 1
+                elif method == 'PUT':
+                    updated += 1
+                else:
+                    updated += 1
+                if method in ('POST', 'PUT'):
+                    try:
+                        body = response.json()
+                        remote_id = body.get('id') or body.get('_id')
+                        if isinstance(remote_id, dict) and remote_id.get('$oid'):
+                            remote_id = remote_id['$oid']
+                        if remote_id:
+                            remote_id = str(remote_id)
+                            post_results.append({
+                                'method': method,
+                                'local_id': op['local_id'],
+                                'remote_id': remote_id,
+                            })
+                    except ValueError:
+                        pass
+            except OSError:
+                errors += 1
+                log.exception('Push request failed for %s', op['url'])
+
+        if errors > 0 and created + updated == 0:
+            return (
+                post_results,
+                '',
+                last_error
+                or 'Push failed: {e} error(s), nothing uploaded.'.format(e=errors),
+            )
+        summary = 'created={c}, updated={u}, errors={e}, skipped={s}'.format(
+            c=created, u=updated, e=errors, s=skipped
+        )
+        return post_results, summary, None
+    except Exception as error:
+        log.exception('Master API push failed')
+        return [], '', str(error)
+
+
 class MasterApiPushWorker(ThreadWorker):
     push_succeeded = QtCore.pyqtSignal(object, str)
     push_failed = QtCore.pyqtSignal(str)
@@ -240,112 +410,22 @@ class MasterApiPushWorker(ThreadWorker):
 
     def start(self):
         settings = Registry().get('settings')
-        headers = build_auth_headers(settings)
-        created = updated = errors = skipped = 0
-        post_results = []
-
         if not self.settings_has_token(settings):
             self.push_failed.emit(
                 'Push requires API token (log in via KWCH web). Upload skipped (no API token).'
             )
             self.quit.emit()
             return
-
-        total = len(self._operations)
-        last_error = None
         try:
-            for position, op in enumerate(self._operations, start=1):
-                self.push_progress.emit(position, total)
-                method = op['method']
-                try:
-                    if method == 'PATCH':
-                        response = requests.patch(
-                            op['url'],
-                            json=op['body'],
-                            headers=headers,
-                            proxies=get_proxy_settings(),
-                            timeout=get_request_timeouts(settings),
-                        )
-                    elif method == 'POST':
-                        response = requests.post(
-                            op['url'],
-                            json=op['body'],
-                            headers=headers,
-                            proxies=get_proxy_settings(),
-                            timeout=get_request_timeouts(settings),
-                        )
-                    elif method == 'DELETE':
-                        log.warning(
-                            'KWCH: ignoring DELETE %s (server delete is admin-only on web)',
-                            op['url'],
-                        )
-                        skipped += 1
-                        continue
-                    else:
-                        skipped += 1
-                        continue
-
-                    if response.status_code == 401:
-                        self.push_failed.emit(
-                            'Push rejected (401): zaloguj ponownie (KWCH Swietochlowice plugin → Połącz z kontem).'
-                        )
-                        return
-                    if response.status_code >= 400:
-                        errors += 1
-                        last_error = describe_push_http_error(response)
-                        log.warning(
-                            'Push %s %s -> %s: %s',
-                            method,
-                            op['url'],
-                            response.status_code,
-                            last_error,
-                        )
-                        continue
-
-                    log.info(
-                        'KWCH: push %s %s -> HTTP %s (local openlp id=%s)',
-                        method,
-                        op['url'],
-                        response.status_code,
-                        op.get('local_id'),
-                    )
-
-                    if method == 'POST':
-                        created += 1
-                        try:
-                            body = response.json()
-                            remote_id = body.get('id') or body.get('_id')
-                            if isinstance(remote_id, dict) and remote_id.get('$oid'):
-                                remote_id = remote_id['$oid']
-                            if remote_id:
-                                remote_id = str(remote_id)
-                                post_results.append({
-                                    'method': 'POST',
-                                    'local_id': op['local_id'],
-                                    'remote_id': remote_id,
-                                })
-                        except ValueError:
-                            pass
-                    else:
-                        updated += 1
-                except OSError:
-                    errors += 1
-                    log.exception('Push request failed for %s', op['url'])
-
-            if errors > 0 and created + updated == 0:
-                self.push_failed.emit(
-                    last_error
-                    or 'Push failed: {e} error(s), nothing uploaded.'.format(e=errors)
-                )
-                return
-
-            summary = 'created={c}, updated={u}, errors={e}, skipped={s}'.format(
-                c=created, u=updated, e=errors, s=skipped
+            post_results, summary, err = run_push_operations(
+                settings,
+                self._operations,
+                progress_callback=self.push_progress.emit,
             )
-            self.push_succeeded.emit(post_results, summary)
-        except Exception as error:
-            log.exception('Master API push failed')
-            self.push_failed.emit(str(error))
+            if err:
+                self.push_failed.emit(err)
+            else:
+                self.push_succeeded.emit(post_results, summary)
         finally:
             self.quit.emit()
 

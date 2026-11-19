@@ -23,7 +23,9 @@ from contrib.plugins.songstats.lib.apiutil import (
     SYNC_PULL_SQLITE,
     build_auth_headers,
     build_stats_headers,
+    clear_plugin_cache,
     get_stats_request_timeouts,
+    has_api_token,
     is_sqlite_dump_pull,
     persist_auth_profile,
     build_presentation_event_payload,
@@ -94,7 +96,9 @@ class SongStatsPlugin(Plugin):
         self._account_profile_fetch_done = False
         self._last_import_summary = ''
         self._remote_index = {}
+        self._prefetched_catalog_items = None
         self._songs_api_base = ''
+        self._presentation_event_ids = set()
         # State module id must match Registry key from class name: SongStatsPlugin → song_stats_plugin
         self._state_name = 'song_stats'
         State().add_service(self._state_name, self.weight, is_plugin=True, requires='songs')
@@ -117,6 +121,7 @@ class SongStatsPlugin(Plugin):
         if Registry().get('songs_manager') and self.status == PluginStatus.Disabled:
             self.set_status()
         if self.is_active():
+            self._register_song_registry_hooks()
             self._ensure_sync_header()
             QtCore.QTimer.singleShot(500, self._refresh_sync_header_display)
             self._prune_stale_version_settings()
@@ -152,6 +157,7 @@ class SongStatsPlugin(Plugin):
         self.sync_header_widget.configure_requested.connect(self._on_kwch_configure)
         self.sync_header_widget.login_requested.connect(self._on_kwch_login)
         self.sync_header_widget.logout_requested.connect(self._on_kwch_logout)
+        self.sync_header_widget.clear_cache_requested.connect(self._on_kwch_clear_cache)
         self.sync_header_widget.open_web_requested.connect(self._on_kwch_open_web)
         self.sync_header_widget.about_requested.connect(self._on_kwch_about)
         self._refresh_sync_header_display()
@@ -194,6 +200,7 @@ class SongStatsPlugin(Plugin):
         self.settings.setValue('songstats/push on edit', True)
         persist_auth_profile(self.settings, token)
         self._refresh_sync_header_display()
+        QtCore.QTimer.singleShot(0, self._flush_pending_edit_push)
         self.main_window.information_message(
             translate('SongStatsPlugin', PLUGIN_DISPLAY_NAME),
             translate('SongStatsPlugin', 'Zalogowano — token zapisany.'),
@@ -219,6 +226,38 @@ class SongStatsPlugin(Plugin):
                 'wylogowania KWCH (bez przekierowania na localhost).',
             ),
         )
+
+    def _on_kwch_clear_cache(self, parent=None):
+        parent = parent or self.main_window
+        reply = QtWidgets.QMessageBox.question(
+            parent,
+            translate('SongStatsPlugin', 'Wyczyść cache'),
+            translate(
+                'SongStatsPlugin',
+                'Zostaną usunięte zapamiętane wersje katalogu, data ostatniej '
+                'synchronizacji oraz zapisany profil (nazwa, avatar).\n\n'
+                'Logowanie, ustawienia i pieśni w OpenLP zostaną.\n\n'
+                'Kontynuować?',
+            ),
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return False
+        clear_plugin_cache(self.settings)
+        self._remote_index = {}
+        self._last_import_summary = ''
+        self._account_profile_fetch_done = False
+        if self.sync_header_widget:
+            self.sync_header_widget.clear_avatar_cache()
+        self._refresh_sync_header_display()
+        if has_api_token(self.settings):
+            self._maybe_fetch_account_profile(force=True)
+        self.main_window.information_message(
+            translate('SongStatsPlugin', PLUGIN_DISPLAY_NAME),
+            translate('SongStatsPlugin', 'Cache wtyczki został wyczyszczony.'),
+        )
+        return True
 
     def _on_kwch_open_web(self):
         import webbrowser
@@ -246,12 +285,19 @@ class SongStatsPlugin(Plugin):
         if self.is_active() and not was_active:
             self._ensure_sync_header()
             self._refresh_sync_header_display()
-    def initialise(self):
-        log.info('Song Stats initialising')
-        super(SongStatsPlugin, self).initialise()
+    def _register_song_registry_hooks(self):
+        """Idempotent — initialise may not run if plugin was enabled before Songs loaded."""
+        Registry().remove_function('slidecontroller_live_started', self.on_live_started)
         Registry().register_function('slidecontroller_live_started', self.on_live_started)
+        Registry().remove_function('song_changed', self.on_local_song_saved)
         Registry().register_function('song_changed', self.on_local_song_saved)
+        Registry().remove_function('song_deleted', self.on_local_song_deleted)
         Registry().register_function('song_deleted', self.on_local_song_deleted)
+
+    def initialise(self):
+        log.info('Song Stats initialising from %s', __file__)
+        super(SongStatsPlugin, self).initialise()
+        self._register_song_registry_hooks()
         if self.sync_songs_action:
             self.sync_songs_action.setVisible(True)
         self._ensure_sync_header()
@@ -346,7 +392,10 @@ class SongStatsPlugin(Plugin):
 
     @staticmethod
     def _push_on_edit_enabled(settings):
-        value = settings.value('songstats/push on edit', True)
+        # OpenLP Settings.value(key) — no Qt-style default argument; use defaults.py / None.
+        value = settings.value('songstats/push on edit')
+        if value is None:
+            return True
         if value is False or value == 0:
             return False
         if isinstance(value, str) and value.strip().lower() in ('false', '0', 'no', 'off'):
@@ -472,6 +521,7 @@ class SongStatsPlugin(Plugin):
         self._enqueue_or_push_song(song_id)
 
     def on_local_song_saved(self, song_id):
+        log.info('KWCH: song_changed openlp id=%s (active=%s)', song_id, self.is_active())
         if not self.is_active():
             return
         from openlp.plugins.songs.lib.db import Song
@@ -480,48 +530,88 @@ class SongStatsPlugin(Plugin):
         if not manager or not manager.get_object(Song, song_id):
             log.debug('KWCH: pomijam wysyłkę — pieśń %s już nie istnieje lokalnie', song_id)
             return
-        from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
+        from contrib.plugins.songstats.lib.apiutil import has_api_token
 
-        if not self._has_api_token():
-            log.debug('KWCH: skip upload — no API token')
+        if not has_api_token(self.settings):
+            log.warning('KWCH: brak JWT — zapis lokalny bez PUT na serwer (menu Konto → zaloguj)')
             mark_local_catalog_drift(self.settings, REASON_EDIT_NO_TOKEN, song_id=song_id)
             self._refresh_sync_header_display()
             self._run_after_edit_dialog_closed(self._show_save_skipped_not_logged_in_dialog)
             return
         if not self._push_on_edit_enabled(self.settings):
             self.settings.setValue('songstats/push on edit', True)
-        self._enqueue_or_push_song(song_id)
+        log.info('KWCH: zaplanowano PUT pieśni %s po song_changed', song_id)
+        self._run_after_edit_dialog_closed(
+            lambda sid=song_id: self._enqueue_or_push_song(sid)
+        )
 
-    def _push_song_to_server(self, song_id, songs_api_base):
+    def _prepare_single_song_push_operation(self, song_id, songs_api_base):
+        """Build PUT payload on the Qt main thread (OpenLP SQLAlchemy session is not thread-safe)."""
         from openlp.plugins.songs.lib.db import Song
 
-        from contrib.plugins.songstats.lib.songsync import build_push_operation_for_song
-        from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
+        from contrib.plugins.songstats.lib.pluginutil import resolve_remote_mongo_id
+        from contrib.plugins.songstats.lib.songsync import (
+            build_openlp_save_operation,
+            ensure_remote_index_for_song,
+        )
 
         manager = get_songs_manager()
         if not manager:
-            return
+            return None, 'Songs database is not available.'
+        song = manager.get_object(Song, song_id)
+        if not song:
+            return None, 'Pieśń id={0} nie istnieje w lokalnej bazie.'.format(song_id)
+        if song.temporary:
+            return None, 'Pieśń tymczasowa — bez wysyłki na serwer.'
         try:
-            song = manager.get_object(Song, song_id)
-            from contrib.plugins.songstats.lib.songsync import ensure_remote_index_for_song
-
+            need_catalog = not resolve_remote_mongo_id(
+                song.comments, song.id, self._remote_index, song=song
+            )
             self._remote_index = ensure_remote_index_for_song(
-                self.settings, self._remote_index, song
+                self.settings,
+                self._remote_index,
+                song,
+                allow_network_fetch=need_catalog,
             )
-            operation = build_push_operation_for_song(
-                manager, self.settings, songs_api_base, song_id, self._remote_index
+            operation = build_openlp_save_operation(
+                song, self.settings, songs_api_base, self._remote_index
             )
-        except Exception:
-            log.exception('KWCH: could not build push for song %s', song_id)
-            return
+        except Exception as error:
+            log.exception('KWCH: edit push build failed')
+            return None, str(error)
         if not operation:
+            return None, 'Brak adresu PUT (ustaw API base URL lub songstats/openlp save url).'
+        return operation, None
+
+    def _reset_edit_push_in_progress(self):
+        if self._push_in_progress:
+            self._push_in_progress = False
+            self._flush_pending_edit_push()
+
+    def _push_song_to_server(self, song_id, songs_api_base):
+        from contrib.plugins.songstats.lib.synchttp import SingleSongOpenlpPushWorker
+
+        operation, err = self._prepare_single_song_push_operation(song_id, songs_api_base)
+        if err:
+            log.warning('KWCH: nie wysłano pieśni %s: %s', song_id, err)
+            mark_local_catalog_drift(self.settings, REASON_PUSH_FAILED, song_id=song_id)
+            self._refresh_sync_header_display()
+            self.main_window.warning_message(
+                translate('SongStatsPlugin', 'Wysyłka pieśni na serwer nie powiodła się'),
+                err,
+            )
             return
         self._last_edit_push_song_id = song_id
         self._push_in_progress = True
-        worker = MasterApiPushWorker([operation])
+        worker = SingleSongOpenlpPushWorker(operation)
         worker.push_succeeded.connect(self._on_edit_push_succeeded)
         worker.push_failed.connect(self._on_edit_push_failed)
+        worker.quit.connect(self._reset_edit_push_in_progress)
         run_thread(worker, 'songstats-edit-push-{uid}'.format(uid=uuid.uuid4().hex[:8]), can_start=True)
+
+    def _on_remote_index_updated(self, index):
+        if isinstance(index, dict):
+            self._remote_index.update(index)
 
     def _on_edit_push_succeeded(self, post_results, summary):
         from contrib.plugins.songstats.lib.songsync import apply_push_response_ids
@@ -1031,6 +1121,7 @@ class SongStatsPlugin(Plugin):
         self._sync_in_progress = True
         self._last_import_summary = ''
         self._remote_index = {}
+        self._prefetched_catalog_items = None
         self._songs_api_base = songs_api_base
         if is_sqlite_dump_pull(pull_url, pull_mode):
             start_msg = translate(
@@ -1186,6 +1277,8 @@ class SongStatsPlugin(Plugin):
                 1,
                 translate('SongStatsPlugin', 'Pobieranie indeksu katalogu serwera…'),
             )
+            prefetched = self._prefetched_catalog_items
+            self._prefetched_catalog_items = None
             stamped, link_index = stamp_remote_ids_after_sqlite_bootstrap(
                 manager,
                 self.settings,
@@ -1197,6 +1290,7 @@ class SongStatsPlugin(Plugin):
                         'Powiązanie pieśni {current}/{total}',
                     ).format(current=current, total=total),
                 ),
+                catalog_items=prefetched,
             )
             if link_index:
                 self._remote_index.update(link_index)
@@ -1265,6 +1359,7 @@ class SongStatsPlugin(Plugin):
                 'KWCH sync: %s songs in JSON response — switching to SQLite dump',
                 song_count,
             )
+            self._prefetched_catalog_items = list(remote_songs or [])
             self._pull_sqlite_dump_instead()
             return
 
@@ -1459,6 +1554,18 @@ class SongStatsPlugin(Plugin):
         service_item = items[0]
         if service_item.name != 'songs':
             return
+
+        event_key = getattr(service_item, 'unique_identifier', None)
+        if event_key and event_key in self._presentation_event_ids:
+            log.debug(
+                'KWCH: pomijam duplikat presentation-events (pozycja liturgii %s)',
+                event_key,
+            )
+            return
+        if event_key:
+            self._presentation_event_ids.add(event_key)
+            if len(self._presentation_event_ids) > 400:
+                self._presentation_event_ids.clear()
 
         url = resolve_stats_url(self.settings)
         if not url:

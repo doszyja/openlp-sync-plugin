@@ -136,6 +136,10 @@ class SongStatsTab(SettingsTab):
         sync_v = QtWidgets.QVBoxLayout(self.sync_group_box)
         self.push_on_edit_check_box = QtWidgets.QCheckBox(self.sync_group_box)
         sync_v.addWidget(self.push_on_edit_check_box)
+        self.delete_hint_label = QtWidgets.QLabel(self.sync_group_box)
+        self.delete_hint_label.setWordWrap(True)
+        self.delete_hint_label.setStyleSheet('color: palette(mid); margin: 0;')
+        sync_v.addWidget(self.delete_hint_label)
 
         self.sync_layout = QtWidgets.QFormLayout()
         self.sync_layout.setFieldGrowthPolicy(
@@ -188,7 +192,21 @@ class SongStatsTab(SettingsTab):
         self.push_on_edit_check_box.setText(
             translate(
                 'SongStatsPlugin.SongStatsTab',
-                'Po zapisie pieśni wyślij ją na serwer',
+                'Od razu po zapisie pieśni wyślij edycję na serwer KWCH',
+            )
+        )
+        self.push_on_edit_check_box.setToolTip(
+            translate(
+                'SongStatsPlugin.SongStatsTab',
+                'Włączone (zalecane): po Zapisz w edytorze pieśni natychmiast PATCH/POST '
+                'na API (wymaga logowania). Wyłączone: tylko OpenLP + ⚠.',
+            )
+        )
+        self.delete_hint_label.setText(
+            translate(
+                'SongStatsPlugin.SongStatsTab',
+                'Usunięcie pieśni w OpenLP nie usuwa jej na serwerze — tylko administrator '
+                'może skasować pieśń w panelu KWCH. Lokalne zmiany bez wysyłki: ⚠ przy wersji lokalnej.',
             )
         )
         self.sync_pull_mode_label.setText(translate('SongStatsPlugin.SongStatsTab', 'Tryb pobierania:'))
@@ -243,8 +261,7 @@ class SongStatsTab(SettingsTab):
 
         push_on_edit = self.settings.value('songstats/push on edit')
         if push_on_edit is None:
-            legacy = self.settings.value('songstats/sync bidirectional')
-            push_on_edit = True if legacy is None else bool(legacy)
+            push_on_edit = True
         self.push_on_edit_check_box.setChecked(bool(push_on_edit))
         pull_mode = (self.settings.value('songstats/sync pull mode') or SYNC_PULL_JSON).lower()
         self.sync_pull_mode_combo.setCurrentIndex(1 if pull_mode == SYNC_PULL_SQLITE else 0)

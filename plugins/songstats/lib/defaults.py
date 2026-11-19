@@ -38,4 +38,5 @@ def register_songstats_settings_defaults():
         'songstats/sync pull mode': SYNC_PULL_JSON,
         'songstats/sync pull url': '',
         'songstats/sync push url': '',
+        'songstats/openlp save url': '',
     })

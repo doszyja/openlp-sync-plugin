@@ -189,6 +189,7 @@ class SyncHeaderWidget(QtCore.QObject):
     configure_requested = QtCore.pyqtSignal()
     login_requested = QtCore.pyqtSignal()
     logout_requested = QtCore.pyqtSignal()
+    clear_cache_requested = QtCore.pyqtSignal()
     open_web_requested = QtCore.pyqtSignal()
     about_requested = QtCore.pyqtSignal()
 
@@ -403,6 +404,8 @@ class SyncHeaderWidget(QtCore.QObject):
         self._act_login.triggered.connect(self.login_requested.emit)
         self._act_logout = self._account_menu.addAction('')
         self._act_logout.triggered.connect(self.logout_requested.emit)
+        self._act_clear_cache = self._account_menu.addAction('')
+        self._act_clear_cache.triggered.connect(self.clear_cache_requested.emit)
         self._act_web = self._account_menu.addAction('')
         self._act_web.triggered.connect(self.open_web_requested.emit)
         self._account_menu.addSeparator()
@@ -633,6 +636,16 @@ class SyncHeaderWidget(QtCore.QObject):
         self._act_logout.setText(
             translate('SongStatsPlugin', 'Wyloguj z Discord…')
         )
+        self._act_clear_cache.setText(
+            translate('SongStatsPlugin', 'Wyczyść cache')
+        )
+        self._act_clear_cache.setToolTip(
+            translate(
+                'SongStatsPlugin',
+                'Usuwa zapamiętane wersje katalogu, datę synchronizacji i profil. '
+                'Nie wylogowuje i nie kasuje pieśni.',
+            )
+        )
         self._act_web.setText(
             translate('SongStatsPlugin', 'Otwórz stronę pieśni…')
         )
@@ -743,6 +756,11 @@ class SyncHeaderWidget(QtCore.QObject):
             return int(remote_version) != int(local_cmp)
         except (TypeError, ValueError):
             return remote_version != local_cmp
+
+    def clear_avatar_cache(self):
+        self._avatar_url = ''
+        self._avatar_pixmap = QtGui.QPixmap()
+        self._avatar_load_busy = False
 
     def _request_account_avatar(self, url):
         url = (url or '').strip()

@@ -201,37 +201,34 @@ def logout_openlp_session(settings, open_browser=True):
     connect_timeout, read_timeout = get_request_timeouts(settings)
 
     if token and api_base:
-        headers = build_auth_headers(settings)
-        common = dict(
-            headers=headers,
-            proxies=get_proxy_settings(),
-            timeout=(connect_timeout, read_timeout),
-        )
-        for method, path in (
-            ('POST', 'auth/openlp/logout'),
-            ('POST', 'auth/logout'),
-            ('POST', 'auth/openlp/revoke'),
-            ('GET', 'auth/openlp/logout'),
-            ('GET', 'auth/logout'),
-        ):
-            url = '{base}/{path}'.format(base=api_base.rstrip('/'), path=path)
-            try:
-                if method == 'POST':
-                    requests.post(url, json={}, **common)
-                else:
-                    requests.get(url, **common)
-            except requests.RequestException as error:
-                log.debug('Logout %s %s: %s', method, path, error)
+        # NestJS AuthController: POST /auth/logout (JWT, no OpenLP-specific path).
+        url = '{base}/auth/logout'.format(base=api_base.rstrip('/'))
+        try:
+            response = requests.post(
+                url,
+                json={},
+                headers=build_auth_headers(settings),
+                proxies=get_proxy_settings(),
+                timeout=(connect_timeout, read_timeout),
+            )
+            if response.status_code >= 400:
+                log.debug(
+                    'Logout POST /auth/logout HTTP %s: %s',
+                    response.status_code,
+                    (response.text or '')[:200],
+                )
+        except requests.RequestException as error:
+            log.debug('Logout POST /auth/logout: %s', error)
 
     clear_auth_session(settings)
     settings.setValue('songstats/force auth prompt', True)
 
     if open_browser and web_base:
-        # Do not pass port= — the web app would redirect to 127.0.0.1:8765/callback
-        # but OpenLP only listens on that port during an active login handshake.
+        # SPA route /auth/openlp/logout — not an API path. Do not pass port=:
+        # the page would redirect to 127.0.0.1:8765/callback, but OpenLP only
+        # listens there during an active login handshake.
         logout_url = '{web}/auth/openlp/logout?{qs}'.format(
             web=web_base.rstrip('/'),
             qs=urlencode({'from': 'openlp'}),
         )
-        if not webbrowser.open(logout_url):
-            webbrowser.open('{web}/auth/logout'.format(web=web_base.rstrip('/')))
+        webbrowser.open(logout_url)

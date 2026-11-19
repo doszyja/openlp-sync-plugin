@@ -14,13 +14,42 @@ SYNC_PULL_SQLITE = 'sqlite'
 DEFAULT_API_BASE = 'https://piesni.swietochlowicekwch.pl/api'
 
 
+def read_api_token(settings):
+    """JWT from QSettings (handles str / QByteArray)."""
+    if settings is None:
+        return ''
+    raw = settings.value('songstats/api token')
+    if raw is None or raw == '':
+        return ''
+    try:
+        from PyQt5.QtCore import QByteArray
+
+        if isinstance(raw, QByteArray):
+            return bytes(raw).decode('utf-8', errors='ignore').strip()
+    except (ImportError, TypeError, ValueError):
+        pass
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw).decode('utf-8', errors='ignore').strip()
+    try:
+        data = raw.data()
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data).decode('utf-8', errors='ignore').strip()
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return str(raw).strip()
+
+
+def has_api_token(settings):
+    return bool(read_api_token(settings))
+
+
 def build_auth_headers(settings, user_agent='OpenLP-SongStats/1.2', accept=None):
     headers = {
         'Accept': accept or 'application/json',
         'Content-Type': 'application/json',
         'User-Agent': user_agent,
     }
-    token = settings.value('songstats/api token')
+    token = read_api_token(settings)
     if token:
         headers['Authorization'] = 'Bearer {token}'.format(token=token)
     return headers
@@ -36,9 +65,9 @@ def build_stats_headers(settings, user_agent='OpenLP-SongStats/1.2'):
         'Content-Type': 'application/json',
         'User-Agent': user_agent,
     }
-    token = settings.value('songstats/api token')
-    if token and str(token).strip():
-        headers['Authorization'] = 'Bearer {0}'.format(str(token).strip())
+    token = read_api_token(settings)
+    if token:
+        headers['Authorization'] = 'Bearer {0}'.format(token)
     return headers
 
 
@@ -112,6 +141,19 @@ def json_pull_requires_auth(settings):
     pull, _, _ = resolve_sync_urls(settings)
     pull_l = pull or ''
     return 'all-openlp' in pull_l or 'songs/changes' in pull_l
+
+
+def resolve_full_catalog_pull_url(settings):
+    """
+    Full catalog fetch to overwrite local drift (all-openlp or SQLite dump).
+    """
+    api_base = get_api_base(settings)
+    if not api_base:
+        return '', SYNC_PULL_JSON
+    mode = get_sync_pull_mode(settings)
+    if mode == SYNC_PULL_SQLITE:
+        return urljoin(api_base + '/', 'songs/export/sqlite'), SYNC_PULL_SQLITE
+    return urljoin(api_base + '/', 'songs/all-openlp'), SYNC_PULL_JSON
 
 
 def resolve_sync_urls(settings):
@@ -197,6 +239,27 @@ def get_web_base(settings):
     if api_base.endswith('/api'):
         return api_base[:-4]
     return api_base
+
+
+def resolve_openlp_catalog_url(settings):
+    """Authenticated GET /songs/all-openlp (mapping index for push PATCH)."""
+    api_base = get_api_base(settings)
+    if not api_base:
+        return ''
+    return urljoin(api_base + '/', 'songs/all-openlp')
+
+
+def resolve_openlp_save_url(settings, songs_api_base=None):
+    """
+    PUT /songs/openlp/save — desktop upsert (id, comments, title/number).
+    """
+    custom = (settings.value('songstats/openlp save url') or '').strip()
+    if custom:
+        return custom.rstrip('/')
+    base = (songs_api_base or get_api_base(settings) or '').strip().rstrip('/')
+    if not base:
+        return ''
+    return urljoin(base + '/', 'songs/openlp/save')
 
 
 def resolve_version_url(settings):
@@ -643,3 +706,24 @@ def clear_auth_session(settings):
     settings.remove('songstats/api token')
     settings.remove('songstats/logged in user id')
     settings.remove('songstats/auth profile')
+
+
+_PLUGIN_CACHE_KEYS = (
+    'songstats/auth profile',
+    'songstats/logged in user id',
+    'songstats/master db version',
+    'songstats/local db version',
+    'songstats/last sync at',
+    'songstats/last sync status',
+)
+
+
+def clear_plugin_cache(settings):
+    """Drop cached catalog versions, last-sync stamps and stored profile.
+
+    Keeps JWT, API URL, songs, drift flags and other plugin settings.
+    """
+    if settings is None:
+        return
+    for key in _PLUGIN_CACHE_KEYS:
+        settings.remove(key)

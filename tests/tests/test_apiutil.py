@@ -5,6 +5,7 @@ from contrib.plugins.songstats.lib.apiutil import (
     build_discord_avatar_url,
     build_presentation_event_payload,
     build_stats_headers,
+    clear_plugin_cache,
     discord_avatar_ui_fetch_url,
     ensure_openlp_client_id,
     get_api_base,
@@ -137,11 +138,21 @@ def test_presentation_payload_anonymous():
         presented_at='2026-01-01T12:00:00+00:00',
         song_metadata={'authors': 'A'},
     )
-    assert payload['source'] == 'openlp'
+    allowed = {
+        'clientId',
+        'openlpSongId',
+        'mongoSongId',
+        'title',
+        'serviceItemTitle',
+        'presentedAt',
+        'metadata',
+    }
+    assert set(payload.keys()) <= allowed
+    assert 'source' not in payload
     assert payload['metadata']['loggedIn'] is False
     assert payload['metadata']['anonymousClient'] is True
-    assert payload['performedBy']['anonymous'] is True
     assert payload['clientId'].startswith('openlp-')
+    assert payload['title'] == 'Test song'
 
 
 def test_presentation_payload_logged_in():
@@ -173,7 +184,8 @@ def test_presentation_payload_logged_in():
     )
     assert payload['metadata']['loggedIn'] is True
     assert 'anonymousClient' not in payload['metadata']
-    assert payload['userId'] == 'user-mongo-id'
+    assert payload['clientId'] == 'user-mongo-id'
+    assert payload['metadata']['performerName']
 
 
 def test_get_stats_request_timeouts_capped():
@@ -217,3 +229,31 @@ def test_json_pull_requires_auth_on_changes_url():
 def test_get_sync_pull_mode_invalid_falls_back():
     s = FakeSettings({'songstats/sync pull mode': 'nonsense'})
     assert get_sync_pull_mode(s) == apiutil.SYNC_PULL_JSON
+
+
+def test_clear_plugin_cache_keeps_login_and_settings():
+    s = FakeSettings(
+        {
+            'songstats/api token': 'tok',
+            'songstats/api base url': DEFAULT_API_BASE,
+            'songstats/auth profile': '{"name":"X"}',
+            'songstats/logged in user id': 'abc',
+            'songstats/local db version': '12',
+            'songstats/master db version': '12',
+            'songstats/last sync at': '2026-11-19T10:00:00+00:00',
+            'songstats/last sync status': 'ok',
+            'songstats/local catalog drift': True,
+            'songstats/openlp client id': 'client-1',
+        }
+    )
+    clear_plugin_cache(s)
+    assert s.value('songstats/api token') == 'tok'
+    assert s.value('songstats/api base url') == DEFAULT_API_BASE
+    assert s.value('songstats/openlp client id') == 'client-1'
+    assert s.value('songstats/local catalog drift') is True
+    assert s.value('songstats/auth profile') is None
+    assert s.value('songstats/logged in user id') is None
+    assert s.value('songstats/local db version') is None
+    assert s.value('songstats/master db version') is None
+    assert s.value('songstats/last sync at') is None
+    assert s.value('songstats/last sync status') is None

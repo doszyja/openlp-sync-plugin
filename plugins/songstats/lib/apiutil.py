@@ -43,6 +43,38 @@ def has_api_token(settings):
     return bool(read_api_token(settings))
 
 
+def validate_api_session(settings):
+    """
+    True when JWT works for API (GET /auth/me). On 401 removes stale token from QSettings.
+    """
+    import requests
+    from openlp.core.common.httputils import get_proxy_settings
+
+    token = read_api_token(settings)
+    if not token:
+        return False
+    api_base = get_api_base(settings)
+    if not api_base:
+        return False
+    url = urljoin(api_base + '/', 'auth/me')
+    try:
+        response = requests.get(
+            url,
+            headers=build_auth_headers(settings),
+            proxies=get_proxy_settings(),
+            timeout=(get_connect_timeout(), min(get_timeout(settings), 8.0)),
+        )
+    except requests.RequestException:
+        return False
+    if response.status_code == 401:
+        settings.remove('songstats/api token')
+        return False
+    if response.status_code == 200:
+        return True
+    # Stary deploy / proxy: nie blokuj pushu jeśli endpoint profilu niedostępny
+    return True
+
+
 def build_auth_headers(settings, user_agent='OpenLP-SongStats/1.2', accept=None):
     headers = {
         'Accept': accept or 'application/json',
@@ -105,7 +137,8 @@ def get_api_base(settings):
     explicit = (settings.value('songstats/api base url') or '').strip().rstrip('/')
     if explicit:
         return explicit
-    if settings.value('songstats/use production default', True) is not False:
+    use_prod = settings.value('songstats/use production default')
+    if use_prod is None or use_prod is not False:
         return DEFAULT_API_BASE
 
     stats_url = (settings.value('songstats/api url') or '').strip()
@@ -145,15 +178,12 @@ def json_pull_requires_auth(settings):
 
 def resolve_full_catalog_pull_url(settings):
     """
-    Full catalog fetch to overwrite local drift (all-openlp or SQLite dump).
+    Full catalog: zawsze SQLite (zawiera songstats:remote_id w comments) — bez zbędnego all-openlp.
     """
     api_base = get_api_base(settings)
     if not api_base:
-        return '', SYNC_PULL_JSON
-    mode = get_sync_pull_mode(settings)
-    if mode == SYNC_PULL_SQLITE:
-        return urljoin(api_base + '/', 'songs/export/sqlite'), SYNC_PULL_SQLITE
-    return urljoin(api_base + '/', 'songs/all-openlp'), SYNC_PULL_JSON
+        return '', SYNC_PULL_SQLITE
+    return urljoin(api_base + '/', 'songs/export/sqlite'), SYNC_PULL_SQLITE
 
 
 def resolve_sync_urls(settings):
@@ -247,6 +277,19 @@ def resolve_openlp_catalog_url(settings):
     if not api_base:
         return ''
     return urljoin(api_base + '/', 'songs/all-openlp')
+
+
+def resolve_openlp_save_url(settings, songs_api_base=None):
+    """
+    PUT /songs/openlp/save — desktop upsert (id, comments, title/number).
+    """
+    custom = (settings.value('songstats/openlp save url') or '').strip()
+    if custom:
+        return custom.rstrip('/')
+    base = (songs_api_base or get_api_base(settings) or '').strip().rstrip('/')
+    if not base:
+        return ''
+    return urljoin(base + '/', 'songs/openlp/save')
 
 
 def resolve_version_url(settings):
@@ -551,7 +594,7 @@ def fetch_identity_from_api(settings):
         return {}
     connect_timeout, read_timeout = get_request_timeouts(settings)
     headers = build_auth_headers(settings)
-    token = (settings.value('songstats/api token') or '').strip()
+    token = read_api_token(settings)
     if not token:
         return {}
     for path in ('auth/me',):
@@ -630,8 +673,8 @@ def build_presentation_event_payload(
     song_metadata,
 ):
     """
-    Body for POST /presentation-events — aligned with KWCH audit entries:
-    who (performedBy / userId), what (entity), when (presentedAt).
+    Body for POST /api/presentation-events — only CreatePresentationEventDto fields (NestJS
+    ValidationPipe whitelist + forbidNonWhitelisted). Server sets source='openlp' on insert.
     """
     token = (settings.value('songstats/api token') or '').strip()
     identity = resolve_account_identity(settings) if token else {}
@@ -639,53 +682,33 @@ def build_presentation_event_payload(
     display_name = (identity.get('name') or '').strip()
     discord_id = (identity.get('discord_id') or '').strip()
 
-    performed_by = {}
-    if user_id:
-        performed_by['userId'] = user_id
-        performed_by['clientId'] = user_id
-    if display_name:
-        performed_by['name'] = display_name
-        performed_by['displayName'] = display_name
-    elif not token:
-        performed_by['displayName'] = 'OpenLP'
-        performed_by['anonymous'] = True
-    if discord_id:
-        performed_by['discordId'] = discord_id
-
-    entity_id = mongo_song_id or (str(openlp_song_id) if openlp_song_id is not None else None)
-    entity = {
-        'type': 'song',
-        'title': title,
-    }
-    if entity_id:
-        entity['id'] = entity_id
-    if mongo_song_id:
-        entity['mongoSongId'] = mongo_song_id
-    if openlp_song_id is not None:
-        entity['openlpSongId'] = openlp_song_id
-
     metadata = dict(song_metadata or {})
     metadata['loggedIn'] = bool(token)
+    if display_name:
+        metadata['performerName'] = display_name
+    if discord_id:
+        metadata['discordId'] = discord_id
     if not token:
         metadata['anonymousClient'] = True
 
+    song_title = (title or service_item_title or '').strip() or 'Unknown'
+
     payload = {
-        'source': 'openlp',
-        'eventType': 'song_presentation',
-        'action': 'present',
         'clientId': user_id,
-        'userId': user_id,
-        'performedBy': performed_by or None,
-        'actor': performed_by or None,
-        'entity': entity,
-        'openlpSongId': openlp_song_id,
-        'mongoSongId': mongo_song_id,
-        'title': title,
-        'serviceItemTitle': service_item_title,
+        'title': song_title,
         'presentedAt': presented_at,
         'metadata': metadata,
     }
-    return {key: value for key, value in payload.items() if value is not None}
+    if service_item_title:
+        payload['serviceItemTitle'] = service_item_title
+    if openlp_song_id is not None:
+        try:
+            payload['openlpSongId'] = int(openlp_song_id)
+        except (TypeError, ValueError):
+            pass
+    if mongo_song_id:
+        payload['mongoSongId'] = str(mongo_song_id).strip()
+    return payload
 
 
 def clear_auth_session(settings):
@@ -693,3 +716,24 @@ def clear_auth_session(settings):
     settings.remove('songstats/api token')
     settings.remove('songstats/logged in user id')
     settings.remove('songstats/auth profile')
+
+
+_PLUGIN_CACHE_KEYS = (
+    'songstats/auth profile',
+    'songstats/logged in user id',
+    'songstats/master db version',
+    'songstats/local db version',
+    'songstats/last sync at',
+    'songstats/last sync status',
+)
+
+
+def clear_plugin_cache(settings):
+    """Drop cached catalog versions, last-sync stamps and stored profile.
+
+    Keeps JWT, API URL, songs, drift flags and other plugin settings.
+    """
+    if settings is None:
+        return
+    for key in _PLUGIN_CACHE_KEYS:
+        settings.remove(key)

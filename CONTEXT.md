@@ -122,7 +122,7 @@ Kluczowe endpointy używane przez wtyczkę:
 | GET/POST | `/songs/...` | Push/pull, SQLite dump |
 | POST | `/auth/openlp/token` | Wymiana kodu OAuth → JWT |
 | GET | `/auth/me` | Avatar Discord, username (nie w JWT) |
-| POST | `/presentation-events` | Statystyka live (JWT opcjonalny) |
+| POST | `/presentation-events` | Statystyka live (JWT opcjonalny); body tylko `CreatePresentationEventDto`: `clientId`, `openlpSongId`, `mongoSongId`, `title`, `serviceItemTitle`, `presentedAt`, `metadata` |
 
 JWT często ma `discordId` bez hash avatara → UI woła **`/auth/me`** jak strona web.
 

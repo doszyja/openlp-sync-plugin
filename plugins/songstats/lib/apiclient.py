@@ -37,11 +37,10 @@ class SongStatsPostWorker(ThreadWorker):
                 timeout=timeout,
             )
             if response.status_code >= 400:
-                log.debug(
-                    'Song Stats API returned %s for %s: %s',
+                log.warning(
+                    'KWCH presentation-events HTTP %s: %s',
                     response.status_code,
-                    self._url,
-                    response.text[:200],
+                    (response.text or '')[:300],
                 )
         except requests.RequestException as err:
             # Offline, timeout, DNS — expected; must not affect Live / UI.

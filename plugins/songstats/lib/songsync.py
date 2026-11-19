@@ -20,7 +20,7 @@ Each song object (normalized internal / legacy JSON):
 """
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
@@ -526,7 +526,9 @@ def fetch_catalog_items_for_linking(settings):
         return [], None
 
 
-def ensure_remote_index_for_song(settings, remote_index, song):
+def ensure_remote_index_for_song(
+    settings, remote_index, song, allow_network_fetch=True
+):
     """
     When comments lack songstats:remote_id, refresh index from server mapping (PATCH not POST).
     """
@@ -534,6 +536,8 @@ def ensure_remote_index_for_song(settings, remote_index, song):
         return remote_index or {}
     index = remote_index if remote_index is not None else {}
     if resolve_remote_mongo_id(song.comments, song.id, index, song=song):
+        return index
+    if not allow_network_fetch:
         return index
     items, _version = fetch_catalog_items_for_linking(settings)
     if not items:
@@ -547,12 +551,33 @@ def ensure_remote_index_for_song(settings, remote_index, song):
     return merge_remote_index(index, items)
 
 
-def stamp_remote_ids_after_sqlite_bootstrap(manager, settings, on_progress=None):
+def count_songs_missing_remote_id(manager):
+    """OpenLP rows bez songstats:remote_id w comments (po imporcie SQLite z serwera często 0)."""
+    missing = 0
+    for song in manager.get_all_objects(Song):
+        if song.temporary:
+            continue
+        if not get_remote_id(song.comments):
+            missing += 1
+    return missing
+
+
+def stamp_remote_ids_after_sqlite_bootstrap(
+    manager, settings, on_progress=None, catalog_items=None
+):
     """
     After a full SQLite import, link local rows to Mongo ids via server catalog index.
     Returns (stamped_count, remote_index dict).
+    catalog_items: optional — reuse list from earlier pull (avoid second GET all-openlp).
     """
-    remote_items, _version = fetch_catalog_items_for_linking(settings)
+    if count_songs_missing_remote_id(manager) == 0:
+        log.info('KWCH: wszystkie pieśni mają remote_id po imporcie SQLite — pomijam indeks HTTP')
+        return 0, {}
+
+    if catalog_items is not None:
+        remote_items = catalog_items
+    else:
+        remote_items, _version = fetch_catalog_items_for_linking(settings)
     if not remote_items:
         return 0, {}
 
@@ -690,6 +715,8 @@ def _tags_from_song(song):
 
 
 def openlp_song_to_master_dto(song, settings):
+    from contrib.plugins.songstats.lib.apiutil import resolve_presentation_client_id
+
     sxml = SongXML()
     verses = []
     for index, (attrs, text) in enumerate(sxml.get_verses(song.lyrics)):
@@ -719,7 +746,15 @@ def openlp_song_to_master_dto(song, settings):
         'searchLyrics': song.search_lyrics or None,
         'tags': _tags_from_song(song),
     }
-    # Bez openlpMapping na serwerze — dopasowanie: songstats:remote_id w comments, tytuł + numer.
+    # openlpMapping → audit metadata (clientId, openlpId) jak przy zapisie z web + źródło openlp.
+    client_id = resolve_presentation_client_id(settings)
+    dto['openlpMapping'] = {
+        'openlpId': int(song.id),
+        'clientId': client_id,
+        'lastSyncedAt': datetime.now(timezone.utc)
+        .isoformat()
+        .replace('+00:00', 'Z'),
+    }
     songbook = (settings.value('songstats/default songbook') or '').strip()
     if songbook:
         # API expects slug string ('pielgrzym', 'zielony', …), not {name: …}
@@ -727,13 +762,27 @@ def openlp_song_to_master_dto(song, settings):
     return dto
 
 
+def build_openlp_save_operation(song, settings, songs_api_base, remote_index=None):
+    """PUT /songs/openlp/save — jeden URL upsert (id, komentarze, tytuł/numer)."""
+    from contrib.plugins.songstats.lib.apiutil import resolve_openlp_save_url
+
+    url = resolve_openlp_save_url(settings, songs_api_base)
+    if not url:
+        return None
+    dto = openlp_song_to_master_dto(song, settings)
+    remote_id = resolve_remote_mongo_id(
+        song.comments, song.id, remote_index or {}, song=song
+    )
+    if remote_id:
+        dto['id'] = remote_id
+    return {'method': 'PUT', 'url': url, 'body': dto, 'local_id': song.id}
+
+
 def build_push_operations(manager, settings, songs_api_base, remote_index, only_local_ids=None):
     """
-    Build HTTP operations for Openlp-database: PATCH /songs/:id or POST /songs.
+    Build PUT /songs/openlp/save for each local song (bulk drift).
 
     Never DELETE — removing a song from the master catalog is admin-only on KWCH web.
-    remote_index: dict remote_id -> cache item from last pull (optional).
-    only_local_ids: if set, push only these OpenLP song ids (bulk drift upload).
     """
     operations = []
     remote_by_id = remote_index or {}
@@ -744,49 +793,28 @@ def build_push_operations(manager, settings, songs_api_base, remote_index, only_
             continue
         if only_set is not None and song.id not in only_set:
             continue
-        dto = openlp_song_to_master_dto(song, settings)
-        remote_id = resolve_remote_mongo_id(
-            song.comments, song.id, remote_by_id, song=song
-        )
-        if remote_id and remote_id in remote_by_id:
-            url = '{base}/songs/{id}'.format(base=songs_api_base.rstrip('/'), id=remote_id)
-            operations.append({'method': 'PATCH', 'url': url, 'body': dto, 'local_id': song.id})
-        elif remote_id:
-            url = '{base}/songs/{id}'.format(base=songs_api_base.rstrip('/'), id=remote_id)
-            operations.append({'method': 'PATCH', 'url': url, 'body': dto, 'local_id': song.id})
-        else:
-            url = '{base}/songs'.format(base=songs_api_base.rstrip('/'))
-            body = dict(dto)
-            body.pop('id', None)
-            operations.append({'method': 'POST', 'url': url, 'body': body, 'local_id': song.id})
+        op = build_openlp_save_operation(song, settings, songs_api_base, remote_by_id)
+        if op:
+            operations.append(op)
     return operations
 
 
 def build_push_operation_for_song(manager, settings, songs_api_base, song_id, remote_index=None):
-    """Single-song upload after OpenLP edit (POST or PATCH /songs). No DELETE."""
+    """Single-song upload after OpenLP edit (PUT /songs/openlp/save)."""
     song = manager.get_object(Song, song_id)
     if not song or song.temporary:
         return None
-    remote_by_id = remote_index or {}
-    dto = openlp_song_to_master_dto(song, settings)
-    remote_id = resolve_remote_mongo_id(
-        song.comments, song.id, remote_by_id, song=song
+    return build_openlp_save_operation(
+        song, settings, songs_api_base, remote_index or {}
     )
-    if remote_id:
-        url = '{base}/songs/{id}'.format(base=songs_api_base.rstrip('/'), id=remote_id)
-        return {'method': 'PATCH', 'url': url, 'body': dto, 'local_id': song.id}
-    url = '{base}/songs'.format(base=songs_api_base.rstrip('/'))
-    body = dict(dto)
-    body.pop('id', None)
-    return {'method': 'POST', 'url': url, 'body': body, 'local_id': song.id}
 
 
 def apply_push_response_ids(manager, results):
     """
-    Store MongoDB id in comments after successful POST (results: list of dicts).
+    Store MongoDB id in comments after successful PUT/POST (results: list of dicts).
     """
     for row in results:
-        if row.get('method') != 'POST' or not row.get('remote_id'):
+        if row.get('method') not in ('POST', 'PUT') or not row.get('remote_id'):
             continue
         song = manager.get_object(Song, row['local_id'])
         if song:

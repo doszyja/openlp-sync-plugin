@@ -12,6 +12,11 @@ def register_songstats_settings_defaults():
         'songstats/enabled': True,
         'songstats/master db version': '',
         'songstats/local db version': '',
+        'songstats/local catalog drift': False,
+        'songstats/local drift since': '',
+        'songstats/local drift reason': '',
+        'songstats/drift song ids': '',
+        'songstats/local drift has deletes': False,
         'songstats/last sync at': '',
         'songstats/last sync status': '',
         'songstats/version url': '',
@@ -33,4 +38,5 @@ def register_songstats_settings_defaults():
         'songstats/sync pull mode': SYNC_PULL_JSON,
         'songstats/sync pull url': '',
         'songstats/sync push url': '',
+        'songstats/openlp save url': '',
     })
