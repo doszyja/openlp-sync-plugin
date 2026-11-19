@@ -2,7 +2,15 @@
 """Sanity checks for Windows install scripts (no PowerShell execution)."""
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+def _find_repo_root() -> Path:
+    here = Path(__file__).resolve()
+    for candidate in (here.parent, *here.parents):
+        if (candidate / 'install.ps1').is_file() and (candidate / 'plugins' / 'songstats').is_dir():
+            return candidate
+    return here.parents[1]
+
+
+REPO = _find_repo_root()
 
 
 def test_install_from_github_script_paths_consistent():

@@ -42,8 +42,8 @@ Mechanizm: `sys.path` wstawia `DataDir`, potem `extension_loader(..., community=
 
 | Sposób | Plik / akcja |
 |--------|----------------|
-| Windows (użytkownik) | README → `iwr …/install-from-github.ps1 -OutFile` + `& $f` (nie `irm \| iex` — BOM) |
-| Windows (clone repo) | `install.ps1` → `%APPDATA%\openlp\data\contrib\` |
+| Windows (użytkownik) | README → pobierz `install-from-github.ps1` do `%TEMP%` i uruchom (`-DataPath` dla portable) |
+| Windows (clone repo) | `install.ps1` → `<DataDir>/contrib/` (wykrywa AppData, portable `Data`, rejestr; `-DataPath`) |
 | Linux/macOS | `install.sh`, opcjonalnie `OPENLP_DATA` |
 | ZIP release | `package.ps1` → `dist/*-import.zip`, `*-contrib.zip` |
 

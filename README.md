@@ -1,12 +1,8 @@
-# OpenLP — wtyczka KWCH Świętochłowice
+# Wtyczka KWCH dla OpenLP
 
-Synchronizacja pieśni i statystyki live z [katalogiem KWCH](https://piesni.swietochlowicekwch.pl). Wymaga OpenLP 4+.
+OpenLP 4+ (Windows). Synchronizacja pieśni i statystyki: [piesni.swietochlowicekwch.pl](https://piesni.swietochlowicekwch.pl).
 
-Repozytorium: [github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin)
-
-## Instalacja (Windows)
-
-**PowerShell** — wklej cały blok:
+## Instalacja
 
 ```powershell
 $f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'
@@ -14,18 +10,12 @@ Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/doszy
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
 ```
 
-Z klonu repozytorium: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1`
-
-### OpenLP portable
-
-Portable trzyma dane w folderze `Data` obok programu (nie w `%APPDATA%`). Uruchom portable raz, potem doinstaluj wtyczkę:
+OpenLP **portable**: po jednym uruchomieniu aplikacji skrypt zwykle sam znajdzie folder `Data`. Jeśli nie — dopisz ścieżkę:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f -DataPath 'D:\sciezka\do\OpenLPPortable\Data'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f -DataPath 'D:\TwojOpenLP\Data'
 ```
 
-(albo `.\install.ps1 -DataPath '…'` z katalogu repozytorium)
+Zrestartuj OpenLP → **Zarządzaj wtyczkami** → **KWCH Swietochlowice plugin**.
 
-Po instalacji: zrestartuj OpenLP → **Zarządzaj wtyczkami** → włącz **KWCH Swietochlowice plugin**.
-
-Dokumentacja techniczna: [CONTEXT.md](CONTEXT.md)
+Kod: [github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin)
