@@ -1,4 +1,4 @@
-# Install Song Stats community plugin into the OpenLP data directory (Windows).
+﻿# Install Song Stats community plugin into the OpenLP data directory (Windows).
 # Usage: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -7,7 +7,7 @@ $SourceContrib = Join-Path $PSScriptRoot '.'
 $TargetContrib = Join-Path $env:APPDATA 'openlp\data\contrib'
 
 if (-not (Test-Path (Join-Path $env:APPDATA 'openlp\data'))) {
-    Write-Host "OpenLP data folder not found. Start OpenLP once, then run this script again."
+    Write-Host 'Brak folderu danych OpenLP — uruchom OpenLP raz i powtórz instalację.'
     exit 1
 }
 
@@ -27,6 +27,6 @@ foreach ($item in $itemsToCopy) {
 }
 
 $pluginPath = Join-Path $TargetContrib 'plugins\songstats\songstatsplugin.py'
-Write-Host "Installed Song Stats plugin."
-Write-Host "Plugin file: $pluginPath"
-Write-Host "Restart OpenLP, enable 'Song Stats' in Plugin Manager, then configure Settings."
+Write-Host 'Zainstalowano wtyczkę KWCH Świętochłowice.'
+Write-Host "Plik: $pluginPath"
+Write-Host 'Zrestartuj OpenLP → Ustawienia → Zarządzaj wtyczkami → włącz „KWCH Swietochlowice plugin”.'
