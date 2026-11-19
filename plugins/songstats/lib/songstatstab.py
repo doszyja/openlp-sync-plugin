@@ -192,7 +192,14 @@ class SongStatsTab(SettingsTab):
         self.push_on_edit_check_box.setText(
             translate(
                 'SongStatsPlugin.SongStatsTab',
-                'Po zapisie pieśni wyślij ją na serwer',
+                'Od razu po zapisie pieśni wyślij edycję na serwer KWCH',
+            )
+        )
+        self.push_on_edit_check_box.setToolTip(
+            translate(
+                'SongStatsPlugin.SongStatsTab',
+                'Włączone (zalecane): po Zapisz w edytorze pieśni natychmiast PATCH/POST '
+                'na API (wymaga logowania). Wyłączone: tylko OpenLP + ⚠.',
             )
         )
         self.delete_hint_label.setText(
@@ -254,8 +261,7 @@ class SongStatsTab(SettingsTab):
 
         push_on_edit = self.settings.value('songstats/push on edit')
         if push_on_edit is None:
-            legacy = self.settings.value('songstats/sync bidirectional')
-            push_on_edit = True if legacy is None else bool(legacy)
+            push_on_edit = True
         self.push_on_edit_check_box.setChecked(bool(push_on_edit))
         pull_mode = (self.settings.value('songstats/sync pull mode') or SYNC_PULL_JSON).lower()
         self.sync_pull_mode_combo.setCurrentIndex(1 if pull_mode == SYNC_PULL_SQLITE else 0)

@@ -38,17 +38,22 @@ from contrib.plugins.songstats.lib.syncdrift import (
     CHOICE_PUSH,
     prompt_local_drift_resolution,
 )
+from contrib.plugins.songstats.lib.authdialog import is_auth_expired_message, offer_session_expired_relogin
 from contrib.plugins.songstats.lib.catalogstate import (
     REASON_DELETED_LOCAL,
     REASON_EDIT_NOT_PUSHED,
     REASON_EDIT_NO_TOKEN,
     REASON_PUSH_FAILED,
     apply_catalog_version_from_server,
+    clear_drift_for_song,
     clear_local_catalog_drift,
     drift_reason,
+    get_drift_song_ids_for_push,
+    has_local_drift_deletes,
     is_local_catalog_drifted,
     local_catalog_version_for_display,
     mark_local_catalog_drift,
+    remove_drift_songs_pushed,
 )
 from contrib.plugins.songstats.lib.pluginutil import get_remote_id, get_songs_manager
 from contrib.plugins.songstats.lib.syncmessages import explain_sync_error
@@ -82,6 +87,9 @@ class SongStatsPlugin(Plugin):
         self._suppress_live_stats = False
         self._push_in_progress = False
         self._bulk_push_in_progress = False
+        self._bulk_push_local_ids = []
+        self._pending_edit_push_ids = []
+        self._last_edit_push_song_id = None
         self._version_check_in_progress = False
         self._account_profile_fetch_done = False
         self._last_import_summary = ''
@@ -112,6 +120,8 @@ class SongStatsPlugin(Plugin):
             self._ensure_sync_header()
             QtCore.QTimer.singleShot(500, self._refresh_sync_header_display)
             self._prune_stale_version_settings()
+            if self.settings.value('songstats/push on edit') is None:
+                self.settings.setValue('songstats/push on edit', True)
 
     def check_pre_conditions(self):
         return Registry().get('songs_manager') is not None
@@ -181,6 +191,7 @@ class SongStatsPlugin(Plugin):
     def _on_kwch_login_ok(self, token):
         self._account_profile_fetch_done = False
         self.settings.setValue('songstats/api token', token)
+        self.settings.setValue('songstats/push on edit', True)
         persist_auth_profile(self.settings, token)
         self._refresh_sync_header_display()
         self.main_window.information_message(
@@ -322,6 +333,7 @@ class SongStatsPlugin(Plugin):
         if self.sync_header_widget:
             self.sync_header_widget.hide_progress()
         self._refresh_sync_header_display()
+        QtCore.QTimer.singleShot(0, self._flush_pending_edit_push)
 
     def on_cancel_sync(self):
         if not self._sync_in_progress:
@@ -344,6 +356,45 @@ class SongStatsPlugin(Plugin):
     def _run_after_edit_dialog_closed(self, callback):
         """Edit song form is modal; defer dialogs until after QDialog.accept()."""
         QtCore.QTimer.singleShot(50, callback)
+
+    def _show_save_push_disabled_dialog(self):
+        window = self.main_window or Registry().get('main_window')
+        if not window:
+            return
+        window.warning_message(
+            translate('SongStatsPlugin', 'Pieśń nie trafi na serwer KWCH'),
+            translate(
+                'SongStatsPlugin',
+                'Pieśń zapisano w OpenLP, ale opcja „Po zapisie wyślij na serwer” jest wyłączona.\n\n'
+                'W ustawieniach wtyczki KWCH włącz wysyłkę albo użyj Synchronizuj → Wyślij lokalne.\n\n'
+                'Wersja lokalna: ⚠ (poza sync).',
+            ),
+        )
+
+    def _show_local_delete_dialog(self):
+        window = self.main_window or Registry().get('main_window')
+        if not window:
+            return
+        window.warning_message(
+            translate('SongStatsPlugin', 'Usunięto tylko lokalnie w OpenLP'),
+            translate(
+                'SongStatsPlugin',
+                'Ta pieśń zniknęła z bazy na tym komputerze.\n\n'
+                'Na stronie KWCH nadal może być w katalogu — usunięcie na serwerze '
+                'wykonuje wyłącznie administrator w panelu webowym.\n\n'
+                'Synchronizacja z serwera może przywrócić tę pieśń do OpenLP.',
+            ),
+        )
+
+    def _handle_http_auth_failure(self, message):
+        if not is_auth_expired_message(message):
+            return False
+        parent = self._main_window_for_dialog()
+        if not parent:
+            return True
+        offer_session_expired_relogin(parent, self.settings, self._on_kwch_login)
+        self._refresh_sync_header_display()
+        return True
 
     def _show_save_skipped_not_logged_in_dialog(self):
         window = self.main_window or Registry().get('main_window')
@@ -371,13 +422,57 @@ class SongStatsPlugin(Plugin):
             'KWCH: pieśń %s usunięta lokalnie w OpenLP — bez żądania DELETE na serwerze',
             song_id,
         )
-        mark_local_catalog_drift(self.settings, REASON_DELETED_LOCAL)
+        mark_local_catalog_drift(self.settings, REASON_DELETED_LOCAL, song_id=song_id)
         self._refresh_sync_header_display()
+        self._run_after_edit_dialog_closed(self._show_local_delete_dialog)
+
+    def _enqueue_or_push_song(self, song_id):
+        if self._sync_in_progress or self._suppress_song_push:
+            log.debug(
+                'KWCH: odłożono push pieśni %s (sync=%s suppress=%s)',
+                song_id,
+                self._sync_in_progress,
+                self._suppress_song_push,
+            )
+            if song_id not in self._pending_edit_push_ids:
+                self._pending_edit_push_ids.append(song_id)
+            return
+        if self._push_in_progress or self._bulk_push_in_progress:
+            if song_id not in self._pending_edit_push_ids:
+                self._pending_edit_push_ids.append(song_id)
+            return
+        _, songs_api_base, _ = resolve_sync_urls(self.settings)
+        if not songs_api_base:
+            window = self._main_window_for_dialog()
+            if window:
+                window.warning_message(
+                    translate('SongStatsPlugin', 'Wysyłka pieśni'),
+                    translate(
+                        'SongStatsPlugin',
+                        'Brak adresu API w ustawieniach KWCH — edycja nie trafi na serwer.',
+                    ),
+                )
+            return
+        log.info('KWCH: wysyłam pieśń %s na serwer po zapisie w OpenLP', song_id)
+        self._push_song_to_server(song_id, songs_api_base)
+
+    def _flush_pending_edit_push(self):
+        if (
+            self._push_in_progress
+            or self._bulk_push_in_progress
+            or self._sync_in_progress
+            or self._suppress_song_push
+        ):
+            return
+        if not self._pending_edit_push_ids:
+            return
+        if not self._has_api_token():
+            return
+        song_id = self._pending_edit_push_ids.pop(0)
+        self._enqueue_or_push_song(song_id)
 
     def on_local_song_saved(self, song_id):
         if not self.is_active():
-            return
-        if self._sync_in_progress or self._suppress_song_push or self._push_in_progress:
             return
         from openlp.plugins.songs.lib.db import Song
 
@@ -387,20 +482,15 @@ class SongStatsPlugin(Plugin):
             return
         from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
 
-        if not MasterApiPushWorker.settings_has_token(self.settings):
+        if not self._has_api_token():
             log.debug('KWCH: skip upload — no API token')
-            mark_local_catalog_drift(self.settings, REASON_EDIT_NO_TOKEN)
+            mark_local_catalog_drift(self.settings, REASON_EDIT_NO_TOKEN, song_id=song_id)
             self._refresh_sync_header_display()
             self._run_after_edit_dialog_closed(self._show_save_skipped_not_logged_in_dialog)
             return
         if not self._push_on_edit_enabled(self.settings):
-            mark_local_catalog_drift(self.settings, REASON_EDIT_NOT_PUSHED)
-            self._refresh_sync_header_display()
-            return
-        _, songs_api_base, _ = resolve_sync_urls(self.settings)
-        if not songs_api_base:
-            return
-        self._push_song_to_server(song_id, songs_api_base)
+            self.settings.setValue('songstats/push on edit', True)
+        self._enqueue_or_push_song(song_id)
 
     def _push_song_to_server(self, song_id, songs_api_base):
         from contrib.plugins.songstats.lib.songsync import build_push_operation_for_song
@@ -418,6 +508,7 @@ class SongStatsPlugin(Plugin):
             return
         if not operation:
             return
+        self._last_edit_push_song_id = song_id
         self._push_in_progress = True
         worker = MasterApiPushWorker([operation])
         worker.push_succeeded.connect(self._on_edit_push_succeeded)
@@ -445,7 +536,11 @@ class SongStatsPlugin(Plugin):
                 return
         if push_summary_had_upload(summary):
             log.info('KWCH: song pushed after local edit (%s)', summary)
+            if self._last_edit_push_song_id is not None:
+                clear_drift_for_song(self.settings, self._last_edit_push_song_id)
+                self._refresh_sync_header_display()
             self._fetch_catalog_version_after_push()
+        self._flush_pending_edit_push()
 
     def _fetch_catalog_version_after_push(self):
         """GET /songs/version after successful PATCH/POST — server bumps catalog version."""
@@ -469,14 +564,21 @@ class SongStatsPlugin(Plugin):
 
     def _on_edit_push_failed(self, message):
         self._push_in_progress = False
-        mark_local_catalog_drift(self.settings, REASON_PUSH_FAILED)
+        song_id = self._last_edit_push_song_id
+        mark_local_catalog_drift(
+            self.settings, REASON_PUSH_FAILED, song_id=song_id
+        )
         self._refresh_sync_header_display()
         log.warning('KWCH upload after edit failed: %s', message)
+        if self._handle_http_auth_failure(message):
+            self._pending_edit_push_ids.clear()
+            return
         title, body = explain_sync_error(message)
         self.main_window.warning_message(
             translate('SongStatsPlugin', 'Wysyłka pieśni na serwer nie powiodła się'),
             body or title,
         )
+        self._flush_pending_edit_push()
 
     def _on_import_progress(self, current, total):
         if not self.sync_header_widget:
@@ -515,8 +617,10 @@ class SongStatsPlugin(Plugin):
         remote_version, local_version = self._catalog_versions_for_display()
         last_at = self.settings.value('songstats/last sync at') or ''
         last_status = self.settings.value('songstats/last sync status') or ''
-        token = (self.settings.value('songstats/api token') or '').strip()
-        has_token = bool(token)
+        from contrib.plugins.songstats.lib.apiutil import has_api_token, read_api_token
+
+        token = read_api_token(self.settings)
+        has_token = has_api_token(self.settings)
         identity = {}
         if has_token:
             from contrib.plugins.songstats.lib.apiutil import resolve_account_identity
@@ -583,9 +687,9 @@ class SongStatsPlugin(Plugin):
         return self.main_window or Registry().get('main_window')
 
     def _has_api_token(self):
-        from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
+        from contrib.plugins.songstats.lib.apiutil import has_api_token
 
-        return MasterApiPushWorker.settings_has_token(self.settings)
+        return has_api_token(self.settings)
 
     def _ask_drift_resolution_if_needed(self):
         if not is_local_catalog_drifted(self.settings):
@@ -631,9 +735,37 @@ class SongStatsPlugin(Plugin):
         from contrib.plugins.songstats.lib.songsync import build_push_operations
         from contrib.plugins.songstats.lib.synchttp import MasterApiPushWorker
 
+        drift_ids = get_drift_song_ids_for_push(self.settings, manager)
+        if not drift_ids:
+            window = self._main_window_for_dialog()
+            if window:
+                if has_local_drift_deletes(self.settings):
+                    window.information_message(
+                        translate('SongStatsPlugin', 'Brak pieśni do wysłania'),
+                        translate(
+                            'SongStatsPlugin',
+                            'Do wysłania nie ma zapisanych edycji — zostały tylko lokalne '
+                            'usunięcia (nie idą na serwer). Użyj „Pobierz z serwera”, aby '
+                            'wyrównać katalog, albo przywróć pieśni w OpenLP.',
+                        ),
+                    )
+                else:
+                    window.information_message(
+                        translate('SongStatsPlugin', 'Brak pieśni do wysłania'),
+                        translate(
+                            'SongStatsPlugin',
+                            'Nie ma oznaczonych lokalnych edycji do wysłania.',
+                        ),
+                    )
+            continuation()
+            return
         try:
             operations = build_push_operations(
-                manager, self.settings, songs_api_base, self._remote_index
+                manager,
+                self.settings,
+                songs_api_base,
+                self._remote_index,
+                only_local_ids=drift_ids,
             )
         except Exception:
             log.exception('KWCH: build_push_operations failed')
@@ -641,6 +773,7 @@ class SongStatsPlugin(Plugin):
         if not operations:
             continuation()
             return
+        self._bulk_push_local_ids = list(drift_ids)
         self._bulk_push_in_progress = True
         if self.sync_header_widget:
             self.sync_header_widget.set_sync_busy(True)
@@ -675,6 +808,8 @@ class SongStatsPlugin(Plugin):
         if failed:
             mark_local_catalog_drift(self.settings, REASON_PUSH_FAILED)
             self._refresh_sync_header_display()
+            if self._handle_http_auth_failure(str(summary_or_error)):
+                return
             title, body = explain_sync_error(str(summary_or_error))
             window = self._main_window_for_dialog()
             if window:
@@ -707,6 +842,22 @@ class SongStatsPlugin(Plugin):
                     return
             except ValueError:
                 pass
+        if self._bulk_push_local_ids:
+            remove_drift_songs_pushed(self.settings, self._bulk_push_local_ids)
+            self._bulk_push_local_ids = []
+            self._refresh_sync_header_display()
+        window = self._main_window_for_dialog()
+        if window and has_local_drift_deletes(self.settings):
+            window.information_message(
+                translate('SongStatsPlugin', 'Wysłano edycje pieśni'),
+                translate(
+                    'SongStatsPlugin',
+                    'Zmiany tekstów trafiły na serwer (jeśli serwer je przyjął).\n\n'
+                    'Lokalne usunięcia pieśni nadal obowiązują tylko w OpenLP — na '
+                    'stronie KWCH te pozycje mogły zostać bez zmian. ⚠ przy wersji '
+                    'lokalnej może dalej być widoczne.',
+                ),
+            )
         continuation()
 
     def _run_catalog_version_check(self):
@@ -779,6 +930,8 @@ class SongStatsPlugin(Plugin):
         if self.sync_header_widget:
             self.sync_header_widget.set_version_checking(False)
         self._refresh_sync_header_display()
+        if self._handle_http_auth_failure(message):
+            return
         title, body = explain_sync_error(message)
         self.main_window.warning_message(title, body or message)
 
@@ -894,6 +1047,8 @@ class SongStatsPlugin(Plugin):
 
     def _on_pull_failed(self, message):
         self._mark_sync_finished(False)
+        if self._handle_http_auth_failure(message):
+            return
         title, body = explain_sync_error(message)
         self.main_window.error_message(title, body)
 

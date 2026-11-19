@@ -14,13 +14,42 @@ SYNC_PULL_SQLITE = 'sqlite'
 DEFAULT_API_BASE = 'https://piesni.swietochlowicekwch.pl/api'
 
 
+def read_api_token(settings):
+    """JWT from QSettings (handles str / QByteArray)."""
+    if settings is None:
+        return ''
+    raw = settings.value('songstats/api token')
+    if raw is None or raw == '':
+        return ''
+    try:
+        from PyQt5.QtCore import QByteArray
+
+        if isinstance(raw, QByteArray):
+            return bytes(raw).decode('utf-8', errors='ignore').strip()
+    except (ImportError, TypeError, ValueError):
+        pass
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw).decode('utf-8', errors='ignore').strip()
+    try:
+        data = raw.data()
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data).decode('utf-8', errors='ignore').strip()
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return str(raw).strip()
+
+
+def has_api_token(settings):
+    return bool(read_api_token(settings))
+
+
 def build_auth_headers(settings, user_agent='OpenLP-SongStats/1.2', accept=None):
     headers = {
         'Accept': accept or 'application/json',
         'Content-Type': 'application/json',
         'User-Agent': user_agent,
     }
-    token = settings.value('songstats/api token')
+    token = read_api_token(settings)
     if token:
         headers['Authorization'] = 'Bearer {token}'.format(token=token)
     return headers

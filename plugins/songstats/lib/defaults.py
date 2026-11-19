@@ -15,6 +15,8 @@ def register_songstats_settings_defaults():
         'songstats/local catalog drift': False,
         'songstats/local drift since': '',
         'songstats/local drift reason': '',
+        'songstats/drift song ids': '',
+        'songstats/local drift has deletes': False,
         'songstats/last sync at': '',
         'songstats/last sync status': '',
         'songstats/version url': '',

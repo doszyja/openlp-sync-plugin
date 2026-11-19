@@ -16,6 +16,8 @@ Zarejestrowane w `lib/defaults.py` via `register_songstats_settings_defaults()`.
 | `songstats/local catalog drift` | `true` gdy lokalna baza odeszła od ostatniego syncu (usunięcie/edycja bez wysyłki) |
 | `songstats/local drift since` | ISO UTC, kiedy ustawiono drift |
 | `songstats/local drift reason` | `deleted_local`, `edit_no_token`, `edit_not_pushed`, `push_failed` |
+| `songstats/drift song ids` | JSON lista OpenLP id pieśni do bulk push (tylko edycje) |
+| `songstats/local drift has deletes` | `true` jeśli było lokalne usunięcie (nie wysyłane DELETE) |
 | `songstats/last sync at`, `last sync status` | UI paska |
 | `songstats/sync pull mode` | `json` \| `sqlite` |
 | `songstats/push on edit` | Push po `song_changed` |

@@ -660,18 +660,22 @@ def openlp_song_to_master_dto(song, settings):
     return dto
 
 
-def build_push_operations(manager, settings, songs_api_base, remote_index):
+def build_push_operations(manager, settings, songs_api_base, remote_index, only_local_ids=None):
     """
     Build HTTP operations for Openlp-database: PATCH /songs/:id or POST /songs.
 
     Never DELETE — removing a song from the master catalog is admin-only on KWCH web.
     remote_index: dict remote_id -> cache item from last pull (optional).
+    only_local_ids: if set, push only these OpenLP song ids (bulk drift upload).
     """
     operations = []
     remote_by_id = remote_index or {}
+    only_set = set(int(i) for i in only_local_ids) if only_local_ids else None
     local_songs = manager.get_all_objects(Song)
     for song in local_songs:
         if song.temporary:
+            continue
+        if only_set is not None and song.id not in only_set:
             continue
         dto = openlp_song_to_master_dto(song, settings)
         remote_id = get_remote_id(song.comments)

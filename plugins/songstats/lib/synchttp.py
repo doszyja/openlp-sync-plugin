@@ -345,4 +345,6 @@ class MasterApiPushWorker(ThreadWorker):
 
     @staticmethod
     def settings_has_token(settings):
-        return bool((settings.value('songstats/api token') or '').strip())
+        from contrib.plugins.songstats.lib.apiutil import has_api_token
+
+        return has_api_token(settings)
