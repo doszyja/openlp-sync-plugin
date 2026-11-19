@@ -1,4 +1,4 @@
-﻿# Download latest plugin tree from GitHub and install into OpenLP DataDir.
+﻿# Fetch repo ZIP from GitHub, expand under %TEMP%, run install.ps1 (no self-copy).
 param(
     [string]$Repo = 'doszyja/openlp-sync-plugin',
     [string]$Branch = 'main'

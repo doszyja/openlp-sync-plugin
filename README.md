@@ -1,36 +1,15 @@
-# OpenLP — wtyczka KWCH (sync pieśni + statystyki live)
+# OpenLP — KWCH Song Stats
 
-Wtyczka community łączy [OpenLP](https://openlp.org/) 4+ z katalogiem pieśni [KWCH Świętochłowice](https://piesni.swietochlowicekwch.pl): synchronizacja bazy, logowanie Discord, zliczanie prezentacji na żywo.
+Synchronizacja pieśni i statystyki live z [KWCH Świętochłowice](https://piesni.swietochlowicekwch.pl). OpenLP 4+, Windows.
 
-Kod i aktualizacje: **[github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin)**
-
-## Instalacja (Windows)
-
-W **PowerShell** wklej **cały blok** (wymaga internetu; działa w oknie PS — nie owijaj w drugie `powershell -Command`):
+**Instalacja (PowerShell, jedna linia):**
 
 ```powershell
-$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'
-Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
+$f = Join-Path $env:TEMP 'kwch-openlp-install.ps1'; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/doszyja/openlp-sync-plugin/main/install-from-github.ps1' -OutFile $f; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f
 ```
 
-Z katalogu sklonowanego repo:
+Z klonu: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1`
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-from-github.ps1
-```
+Zrestartuj OpenLP i włącz wtyczkę w **Zarządzaj wtyczkami**. Nie używaj `irm | iex` (BOM).
 
-(Opcjonalnie tylko lokalne pliki: `.\install.ps1`.)
-
-Nie używaj `irm … | iex` — BOM z GitHub psuje pierwszą linię skryptu.
-
-Potem **zrestartuj OpenLP** → **Ustawienia → Zarządzaj wtyczkami** → włącz **KWCH Swietochlowice plugin**.
-
-## Po instalacji
-
-- W pasku menu (u góry): synchronizacja, wersja bazy, konto Discord (opcjonalnie).
-- Pieśń na **Live** wysyła statystykę na serwer KWCH (działa też bez logowania).
-
----
-
-Dokumentacja techniczna: [CONTEXT.md](CONTEXT.md)
+[github.com/doszyja/openlp-sync-plugin](https://github.com/doszyja/openlp-sync-plugin) · [CONTEXT.md](CONTEXT.md)
