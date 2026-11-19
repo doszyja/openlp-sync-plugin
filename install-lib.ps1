@@ -167,19 +167,36 @@ function Find-OpenLPIniFiles {
     return $found
 }
 
+function Test-OpenLPDataDirLooksActive {
+    param([string]$DataDir)
+
+    if (-not $DataDir -or -not (Test-Path -LiteralPath $DataDir)) {
+        return $false
+    }
+    if (Test-Path -LiteralPath (Join-Path $DataDir 'OpenLP.ini')) {
+        return $true
+    }
+    foreach ($marker in @('songs', 'themes', 'contrib')) {
+        if (Test-Path -LiteralPath (Join-Path $DataDir $marker)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Discover-OpenLPDataDirs {
     $candidates = @()
-
-    $reg = Get-OpenLPRegistryDataPath
-    if ($reg) {
-        $candidates += $reg
-    }
 
     foreach ($ini in Find-OpenLPIniFiles) {
         $fromIni = Get-OpenLPDataPathFromIni -IniPath $ini
         if ($fromIni) {
             $candidates += $fromIni
         }
+    }
+
+    $reg = Get-OpenLPRegistryDataPath
+    if ($reg) {
+        $candidates += $reg
     }
 
     $unique = @()
@@ -194,13 +211,65 @@ function Discover-OpenLPDataDirs {
     return $unique
 }
 
+function Normalize-OpenLPDataPathInput {
+    param([string]$DataPath)
+
+    if (-not $DataPath) {
+        return ''
+    }
+
+    $p = $DataPath.TrimEnd('\', '/')
+    if (Test-Path -LiteralPath (Join-Path $p 'OpenLP.ini')) {
+        return $p
+    }
+
+    $leaf = Split-Path -Leaf $p
+    if ($leaf -ieq 'OpenLP' -or $leaf -ieq 'openlp') {
+        foreach ($rel in @('..\..\Data', '..\Data', '..\..\..\Data')) {
+            $candidate = [System.IO.Path]::GetFullPath((Join-Path $p $rel))
+            if (Test-Path -LiteralPath (Join-Path $candidate 'OpenLP.ini')) {
+                Write-Host "Podano App\OpenLP — uzywam folderu Data: $candidate"
+                return $candidate
+            }
+        }
+    }
+
+    return $p
+}
+
+function Get-ContribInstallRoots {
+    param([string]$ResolvedDataRoot)
+
+    $roots = @()
+    if (-not $ResolvedDataRoot -or -not (Test-Path -LiteralPath $ResolvedDataRoot)) {
+        return $roots
+    }
+
+    $resolvedNorm = (Resolve-Path -LiteralPath $ResolvedDataRoot).Path
+    $roots += $resolvedNorm
+
+    # OpenLP 4.x (Windows): community plugins load from %APPDATA%\openlp\data, not App\OpenLP\plugins.
+    $appDataRoot = Join-Path $env:APPDATA 'openlp\data'
+    if ($env:OS -like 'Windows*') {
+        $appNorm = $appDataRoot
+        if (Test-Path -LiteralPath $appDataRoot) {
+            $appNorm = (Resolve-Path -LiteralPath $appDataRoot).Path
+        }
+        if ($appNorm -ne $resolvedNorm) {
+            $roots += $appNorm
+        }
+    }
+
+    return $roots | Select-Object -Unique
+}
+
 function Resolve-OpenLPDataDir {
     param(
         [string]$DataPath = ''
     )
 
     if ($DataPath) {
-        $resolved = $DataPath.TrimEnd('\', '/')
+        $resolved = Normalize-OpenLPDataPathInput -DataPath $DataPath
         if (-not (Test-Path -LiteralPath $resolved)) {
             Write-Error "Folder danych nie istnieje: $resolved"
         }
@@ -212,6 +281,25 @@ function Resolve-OpenLPDataDir {
     }
 
     $discovered = @(Discover-OpenLPDataDirs)
+
+    $portableStyle = @($discovered | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'OpenLP.ini') })
+    if ($portableStyle.Count -eq 1) {
+        Write-Host "Wykryto folder danych OpenLP (OpenLP.ini): $($portableStyle[0])"
+        return $portableStyle[0]
+    }
+    if ($portableStyle.Count -gt 1) {
+        Write-Host 'Kilka kopii OpenLP portable — wskaz folder Data tej, ktorej uzywasz (-DataPath):'
+        foreach ($p in $portableStyle) {
+            Write-Host "  $p"
+        }
+        return $null
+    }
+
+    $active = @($discovered | Where-Object { Test-OpenLPDataDirLooksActive $_ })
+    if ($active.Count -eq 1) {
+        Write-Host "Wykryto folder danych OpenLP: $($active[0])"
+        return $active[0]
+    }
     if ($discovered.Count -eq 1) {
         Write-Host "Wykryto folder danych OpenLP: $($discovered[0])"
         return $discovered[0]
@@ -226,6 +314,7 @@ function Resolve-OpenLPDataDir {
 
     $default = Join-Path $env:APPDATA 'openlp\data'
     if (Test-Path -LiteralPath $default) {
+        Write-Host "Uzywam domyslnego folderu danych: $default"
         return $default
     }
 
@@ -239,9 +328,9 @@ Nie znaleziono folderu danych OpenLP.
 
   Instalacja standardowa: uruchom OpenLP raz (powstaje %APPDATA%\openlp\data), potem powtorz instalacje.
 
-  OpenLP portable: uruchom portable raz, potem podaj folder Data, np.:
-    -DataPath 'D:\OpenLPPortable\Data'
+  OpenLP portable: folder Data obok App\OpenLP (NIE katalog App\OpenLP\plugins).
+  Na Windows skrypt kopiuje tez do %APPDATA%\openlp\data\contrib — stad OpenLP laduje wtyczki community.
 
-  (Skrypt sam szuka OpenLP.ini i wpisu w rejestrze — jesli nic nie znalazl, sciezka musi byc podana recznie.)
+  Przyklad: -DataPath 'D:\OpenLPPortable\Data'
 '@
 }

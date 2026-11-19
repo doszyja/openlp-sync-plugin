@@ -10,6 +10,8 @@ Dokument techniczny (architektura, instalacja dla dev, API). Użytkownikom: [REA
 
 ## Układ w OpenLP (DataDir)
 
+**Portable (PortableApps):** wbudowane moduły są w `App/OpenLP/plugins/`; wtyczka KWCH to **community** — folder `contrib` pod **Data** (np. `OpenLPPortable/Data/contrib/…`). Na Windows OpenLP 4.x historycznie ładuje community także z `%APPDATA%\openlp\data\contrib\` — instalator `install.ps1` kopiuje w oba miejsca, gdy to różne ścieżki.
+
 Po instalacji:
 
 ```text

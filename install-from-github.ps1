@@ -56,26 +56,35 @@ if (-not (Test-Path -LiteralPath $pluginFile)) {
     Write-Error "Brak plugins\songstats w archiwum — to nie jest pelne repo contrib."
 }
 
+. $installLib
+$resolvedData = Resolve-OpenLPDataDir -DataPath $DataPath
+if (-not $resolvedData) {
+    Write-OpenLPDataDirHelp
+    exit 1
+}
+
 $installArgs = @(
     '-NoProfile',
     '-ExecutionPolicy', 'Bypass',
-    '-File', $installScript
+    '-File', $installScript,
+    '-DataPath', $resolvedData
 )
-if ($DataPath) {
-    $installArgs += @('-DataPath', $DataPath)
-}
 & powershell.exe @installArgs
-
-. $installLib
-$dataRoot = Resolve-OpenLPDataDir -DataPath $DataPath
-$installedPlugin = if ($dataRoot) {
-    Join-Path $dataRoot 'contrib\plugins\songstats\songstatsplugin.py'
-} else {
-    $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "install.ps1 zakonczyl sie bledem (kod $LASTEXITCODE)."
 }
 
-if (-not $installedPlugin -or -not (Test-Path -LiteralPath $installedPlugin)) {
-    Write-Error 'Instalacja nie skopiowala wtyczki — sprawdz sciezke danych (-DataPath dla portable) i sprobuj ponownie.'
+$installedRoots = @(Get-ContribInstallRoots -ResolvedDataRoot $resolvedData)
+$found = $false
+foreach ($root in $installedRoots) {
+    $p = Join-Path $root 'contrib\plugins\songstats\songstatsplugin.py'
+    if (Test-Path -LiteralPath $p) {
+        $found = $true
+        break
+    }
+}
+if (-not $found) {
+    Write-Error 'Po instalacji brak pliku wtyczki w zadnym z docelowych folderow.'
 }
 
 Write-Host 'Gotowe.'
